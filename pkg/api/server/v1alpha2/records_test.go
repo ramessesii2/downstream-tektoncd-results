@@ -26,9 +26,7 @@ import (
 	"github.com/tektoncd/results/pkg/api/server/db/pagination"
 	"github.com/tektoncd/results/pkg/api/server/test"
 	"github.com/tektoncd/results/pkg/api/server/v1alpha2/record"
-	recordutil "github.com/tektoncd/results/pkg/api/server/v1alpha2/record"
 	"github.com/tektoncd/results/pkg/api/server/v1alpha2/result"
-	resultutil "github.com/tektoncd/results/pkg/api/server/v1alpha2/result"
 	"github.com/tektoncd/results/pkg/internal/jsonutil"
 	ppb "github.com/tektoncd/results/proto/pipeline/v1beta1/pipeline_go_proto"
 	pb "github.com/tektoncd/results/proto/v1alpha2/results_go_proto"
@@ -47,10 +45,10 @@ func TestCreateRecord(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	result, err := srv.CreateResult(ctx, &pb.CreateResultRequest{
-		Parent: "foo",
+	res, err := srv.CreateResult(ctx, &pb.CreateResultRequest{
+		Parent: result.FormatParent("a", "b"),
 		Result: &pb.Result{
-			Name: "foo/results/bar",
+			Name: result.FormatName(result.FormatParent("a", "b"), "c"),
 		},
 	})
 	if err != nil {
@@ -58,9 +56,9 @@ func TestCreateRecord(t *testing.T) {
 	}
 
 	req := &pb.CreateRecordRequest{
-		Parent: result.GetName(),
+		Parent: res.GetName(),
 		Record: &pb.Record{
-			Name: recordutil.FormatName(result.GetName(), "baz"),
+			Name: record.FormatName(res.GetName(), "d"),
 			Data: &pb.Any{
 				Type:  "TaskRun",
 				Value: jsonutil.AnyBytes(t, &v1beta1.TaskRun{ObjectMeta: v1.ObjectMeta{Name: "tacocat"}}),
@@ -74,10 +72,7 @@ func TestCreateRecord(t *testing.T) {
 		}
 		want := proto.Clone(req.GetRecord()).(*pb.Record)
 		want.Id = fmt.Sprint(lastID)
-		want.Uid = fmt.Sprint(lastID)
-		want.CreatedTime = timestamppb.New(clock.Now())
 		want.CreateTime = timestamppb.New(clock.Now())
-		want.UpdatedTime = timestamppb.New(clock.Now())
 		want.UpdateTime = timestamppb.New(clock.Now())
 		want.Etag = mockEtag(lastID, clock.Now().UnixNano())
 
@@ -97,7 +92,7 @@ func TestCreateRecord(t *testing.T) {
 			req: &pb.CreateRecordRequest{
 				Parent: req.GetParent(),
 				Record: &pb.Record{
-					Name: resultutil.FormatName("foo", "baz"),
+					Name: record.FormatName(record.FormatParent("x", "y", "z"), "d"),
 				},
 			},
 			want: codes.InvalidArgument,
@@ -105,9 +100,9 @@ func TestCreateRecord(t *testing.T) {
 		{
 			name: "parent does not exist",
 			req: &pb.CreateRecordRequest{
-				Parent: resultutil.FormatName("foo", "doesnotexist"),
+				Parent: record.FormatParent("x", "y", "z"),
 				Record: &pb.Record{
-					Name: recordutil.FormatName(resultutil.FormatName("foo", "doesnotexist"), "baz"),
+					Name: record.FormatName(record.FormatParent("x", "y", "z"), "d"),
 				},
 			},
 			want: codes.NotFound,
@@ -117,7 +112,7 @@ func TestCreateRecord(t *testing.T) {
 			req: &pb.CreateRecordRequest{
 				Parent: req.GetParent(),
 				Record: &pb.Record{
-					Name: fmt.Sprintf("%s/results/", result.GetName()),
+					Name: fmt.Sprintf("%s/results/", res.GetName()),
 				},
 			},
 			want: codes.InvalidArgument,
@@ -127,7 +122,7 @@ func TestCreateRecord(t *testing.T) {
 			req: &pb.CreateRecordRequest{
 				Parent: req.GetParent(),
 				Record: &pb.Record{
-					Name: result.GetName(),
+					Name: res.GetName(),
 				},
 			},
 			want: codes.InvalidArgument,
@@ -151,11 +146,11 @@ func TestCreateRecord(t *testing.T) {
 // API Server into thinking the parent is valid during initial validation,
 // but fails when writing the Record due to foreign key constraints.
 func TestCreateRecord_ConcurrentDelete(t *testing.T) {
-	result := "deleted"
+	res := "deleted"
 	srv, err := New(
 		test.NewDB(t),
 		withGetResultID(func(context.Context, string, string) (string, error) {
-			return result, nil
+			return res, nil
 		}),
 	)
 	if err != nil {
@@ -163,15 +158,15 @@ func TestCreateRecord_ConcurrentDelete(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	parent := resultutil.FormatName("foo", result)
-	record, err := srv.CreateRecord(ctx, &pb.CreateRecordRequest{
+	parent := record.FormatParent("a", "b", res)
+	rec, err := srv.CreateRecord(ctx, &pb.CreateRecordRequest{
 		Parent: parent,
 		Record: &pb.Record{
-			Name: recordutil.FormatName(parent, "baz"),
+			Name: record.FormatName(parent, "d"),
 		},
 	})
 	if status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("CreateRecord: %+v, %v", record, err)
+		t.Fatalf("CreateRecord: %+v, %v", rec, err)
 	}
 }
 
@@ -182,20 +177,20 @@ func TestGetRecord(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	result, err := srv.CreateResult(ctx, &pb.CreateResultRequest{
-		Parent: "foo",
+	res, err := srv.CreateResult(ctx, &pb.CreateResultRequest{
+		Parent: result.FormatParent("a", "b"),
 		Result: &pb.Result{
-			Name: "foo/results/bar",
+			Name: result.FormatName(result.FormatParent("a", "b"), "c"),
 		},
 	})
 	if err != nil {
 		t.Fatalf("CreateResult: %v", err)
 	}
 
-	record, err := srv.CreateRecord(ctx, &pb.CreateRecordRequest{
-		Parent: result.GetName(),
+	rec, err := srv.CreateRecord(ctx, &pb.CreateRecordRequest{
+		Parent: res.GetName(),
 		Record: &pb.Record{
-			Name: recordutil.FormatName(result.GetName(), "baz"),
+			Name: record.FormatName(res.GetName(), "d"),
 		},
 	})
 	if err != nil {
@@ -203,11 +198,11 @@ func TestGetRecord(t *testing.T) {
 	}
 
 	t.Run("success", func(t *testing.T) {
-		got, err := srv.GetRecord(ctx, &pb.GetRecordRequest{Name: record.GetName()})
+		got, err := srv.GetRecord(ctx, &pb.GetRecordRequest{Name: rec.GetName()})
 		if err != nil {
 			t.Fatalf("GetRecord: %v", err)
 		}
-		if diff := cmp.Diff(got, record, protocmp.Transform()); diff != "" {
+		if diff := cmp.Diff(got, rec, protocmp.Transform()); diff != "" {
 			t.Errorf("-want, +got: %s", diff)
 		}
 	})
@@ -225,12 +220,12 @@ func TestGetRecord(t *testing.T) {
 		},
 		{
 			name: "invalid name",
-			req:  &pb.GetRecordRequest{Name: "a/results/doesnotexist"},
+			req:  &pb.GetRecordRequest{Name: record.FormatName(res.GetName(), "d/e")},
 			want: codes.InvalidArgument,
 		},
 		{
 			name: "not found",
-			req:  &pb.GetRecordRequest{Name: recordutil.FormatName(result.GetName(), "doesnotexist")},
+			req:  &pb.GetRecordRequest{Name: record.FormatName(res.GetName(), "doesnotexist")},
 			want: codes.NotFound,
 		},
 	} {
@@ -250,10 +245,10 @@ func TestListRecords(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	result, err := srv.CreateResult(ctx, &pb.CreateResultRequest{
-		Parent: "foo",
+	res, err := srv.CreateResult(ctx, &pb.CreateResultRequest{
+		Parent: result.FormatParent("a", "b"),
 		Result: &pb.Result{
-			Name: "foo/results/bar",
+			Name: result.FormatName(result.FormatParent("a", "b"), "c"),
 		},
 	})
 	if err != nil {
@@ -265,9 +260,9 @@ func TestListRecords(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		fakeClock.Advance(time.Second)
 		r, err := srv.CreateRecord(ctx, &pb.CreateRecordRequest{
-			Parent: result.GetName(),
+			Parent: res.GetName(),
 			Record: &pb.Record{
-				Name: fmt.Sprintf("%s/records/%d", result.GetName(), i),
+				Name: fmt.Sprintf("%s/records/%d", res.GetName(), i),
 				Data: &pb.Any{
 					Type: "TaskRun",
 					Value: jsonutil.AnyBytes(t, &v1beta1.TaskRun{ObjectMeta: v1.ObjectMeta{
@@ -287,9 +282,9 @@ func TestListRecords(t *testing.T) {
 	for i := 3; i < 6; i++ {
 		fakeClock.Advance(time.Second)
 		r, err := srv.CreateRecord(ctx, &pb.CreateRecordRequest{
-			Parent: result.GetName(),
+			Parent: res.GetName(),
 			Record: &pb.Record{
-				Name: fmt.Sprintf("%s/records/%d", result.GetName(), i),
+				Name: fmt.Sprintf("%s/records/%d", res.GetName(), i),
 				Data: &pb.Any{
 					Type: "PipelineRun",
 					Value: jsonutil.AnyBytes(t, &v1beta1.PipelineRun{ObjectMeta: v1.ObjectMeta{
@@ -319,7 +314,7 @@ func TestListRecords(t *testing.T) {
 		{
 			name: "all",
 			req: &pb.ListRecordsRequest{
-				Parent: result.GetName(),
+				Parent: res.GetName(),
 			},
 			want: &pb.ListRecordsResponse{
 				Records: records,
@@ -329,15 +324,15 @@ func TestListRecords(t *testing.T) {
 			// TODO: We should return NOT_FOUND in the future.
 			name: "missing parent",
 			req: &pb.ListRecordsRequest{
-				Parent: "foo/results/baz",
+				Parent: record.FormatParent("x", "y", "z"),
 			},
 			want: &pb.ListRecordsResponse{},
 		},
 		{
 			name: "filter by record property",
 			req: &pb.ListRecordsRequest{
-				Parent: result.GetName(),
-				Filter: `name == "foo/results/bar/records/0"`,
+				Parent: res.GetName(),
+				Filter: `name == "clusters/a/namespaces/b/results/c/records/0"`,
 			},
 			want: &pb.ListRecordsResponse{
 				Records: records[:1],
@@ -346,7 +341,7 @@ func TestListRecords(t *testing.T) {
 		{
 			name: "filter by record data",
 			req: &pb.ListRecordsRequest{
-				Parent: result.GetName(),
+				Parent: res.GetName(),
 				Filter: `data.metadata.name == "0"`,
 			},
 			want: &pb.ListRecordsResponse{
@@ -356,7 +351,7 @@ func TestListRecords(t *testing.T) {
 		{
 			name: "filter by record type",
 			req: &pb.ListRecordsRequest{
-				Parent: result.GetName(),
+				Parent: res.GetName(),
 				Filter: `data_type == "TaskRun"`,
 			},
 			want: &pb.ListRecordsResponse{
@@ -366,8 +361,8 @@ func TestListRecords(t *testing.T) {
 		{
 			name: "filter by parent",
 			req: &pb.ListRecordsRequest{
-				Parent: result.GetName(),
-				Filter: fmt.Sprintf(`name.startsWith("%s")`, result.GetName()),
+				Parent: res.GetName(),
+				Filter: fmt.Sprintf(`name.startsWith("%s")`, res.GetName()),
 			},
 			want: &pb.ListRecordsResponse{
 				Records: records,
@@ -377,7 +372,7 @@ func TestListRecords(t *testing.T) {
 		{
 			name: "filter and page size",
 			req: &pb.ListRecordsRequest{
-				Parent:   result.GetName(),
+				Parent:   res.GetName(),
 				Filter:   `data_type == "TaskRun"`,
 				PageSize: 1,
 			},
@@ -389,7 +384,7 @@ func TestListRecords(t *testing.T) {
 		{
 			name: "only page size",
 			req: &pb.ListRecordsRequest{
-				Parent:   result.GetName(),
+				Parent:   res.GetName(),
 				PageSize: 1,
 			},
 			want: &pb.ListRecordsResponse{
@@ -401,7 +396,7 @@ func TestListRecords(t *testing.T) {
 		{
 			name: "with order asc",
 			req: &pb.ListRecordsRequest{
-				Parent:  result.GetName(),
+				Parent:  res.GetName(),
 				OrderBy: "created_time asc",
 			},
 			want: &pb.ListRecordsResponse{
@@ -411,7 +406,7 @@ func TestListRecords(t *testing.T) {
 		{
 			name: "with order desc",
 			req: &pb.ListRecordsRequest{
-				Parent:  result.GetName(),
+				Parent:  res.GetName(),
 				OrderBy: "created_time desc",
 			},
 			want: &pb.ListRecordsResponse{
@@ -421,7 +416,7 @@ func TestListRecords(t *testing.T) {
 		{
 			name: "with missing order",
 			req: &pb.ListRecordsRequest{
-				Parent:  result.GetName(),
+				Parent:  res.GetName(),
 				OrderBy: "",
 			},
 			want: &pb.ListRecordsResponse{
@@ -431,7 +426,7 @@ func TestListRecords(t *testing.T) {
 		{
 			name: "with default order",
 			req: &pb.ListRecordsRequest{
-				Parent:  result.GetName(),
+				Parent:  res.GetName(),
 				OrderBy: "created_time",
 			},
 			want: &pb.ListRecordsResponse{
@@ -443,7 +438,7 @@ func TestListRecords(t *testing.T) {
 		{
 			name: "unknown type",
 			req: &pb.ListRecordsRequest{
-				Parent: result.GetName(),
+				Parent: res.GetName(),
 				Filter: `type(record.data) == tekton.pipeline.v1beta1.Unknown`,
 			},
 			status: codes.InvalidArgument,
@@ -451,7 +446,7 @@ func TestListRecords(t *testing.T) {
 		{
 			name: "unknown any field",
 			req: &pb.ListRecordsRequest{
-				Parent: result.GetName(),
+				Parent: res.GetName(),
 				Filter: `record.data.metadata.unknown == "tacocat"`,
 			},
 			status: codes.InvalidArgument,
@@ -459,7 +454,7 @@ func TestListRecords(t *testing.T) {
 		{
 			name: "invalid page size",
 			req: &pb.ListRecordsRequest{
-				Parent:   result.GetName(),
+				Parent:   res.GetName(),
 				PageSize: -1,
 			},
 			status: codes.InvalidArgument,
@@ -474,7 +469,7 @@ func TestListRecords(t *testing.T) {
 		{
 			name: "invalid order by clause",
 			req: &pb.ListRecordsRequest{
-				Parent:  result.GetName(),
+				Parent:  res.GetName(),
 				OrderBy: "created_time desc asc",
 			},
 			status: codes.InvalidArgument,
@@ -482,7 +477,7 @@ func TestListRecords(t *testing.T) {
 		{
 			name: "invalid sort direction",
 			req: &pb.ListRecordsRequest{
-				Parent:  result.GetName(),
+				Parent:  res.GetName(),
 				OrderBy: "created_time foo",
 			},
 			status: codes.InvalidArgument,
@@ -513,10 +508,10 @@ func TestUpdateRecord(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	result, err := srv.CreateResult(ctx, &pb.CreateResultRequest{
-		Parent: "foo",
+	res, err := srv.CreateResult(ctx, &pb.CreateResultRequest{
+		Parent: result.FormatParent("a", "b"),
 		Result: &pb.Result{
-			Name: result.FormatName("foo", "bar"),
+			Name: result.FormatName(result.FormatParent("a", "b"), "c"),
 		},
 	})
 	if err != nil {
@@ -532,22 +527,22 @@ func TestUpdateRecord(t *testing.T) {
 	tt := []struct {
 		name string
 		// Starting Record to create.
-		record *pb.Record
-		req    *pb.UpdateRecordRequest
-		// Expected update diff: expected Record should be merge of
+		rec *pb.Record
+		req *pb.UpdateRecordRequest
+		// Expected update diff: expected Record should be a merge of
 		// record + diff.
 		diff   *pb.Record
 		status codes.Code
 	}{
 		{
 			name: "success",
-			record: &pb.Record{
-				Name: record.FormatName(result.GetName(), "a"),
+			rec: &pb.Record{
+				Name: record.FormatName(res.GetName(), "a"),
 			},
 			req: &pb.UpdateRecordRequest{
 				Etag: mockEtag(lastID+1, clock.Now().UnixNano()),
 				Record: &pb.Record{
-					Name: record.FormatName(result.GetName(), "a"),
+					Name: record.FormatName(res.GetName(), "a"),
 					Data: &pb.Any{
 						Value: jsonutil.AnyBytes(t, tr),
 					},
@@ -561,12 +556,12 @@ func TestUpdateRecord(t *testing.T) {
 		},
 		{
 			name: "ignored fields",
-			record: &pb.Record{
-				Name: record.FormatName(result.GetName(), "b"),
+			rec: &pb.Record{
+				Name: record.FormatName(res.GetName(), "b"),
 			},
 			req: &pb.UpdateRecordRequest{
 				Record: &pb.Record{
-					Name: record.FormatName(result.GetName(), "b"),
+					Name: record.FormatName(res.GetName(), "b"),
 					Id:   "ignored",
 				},
 			},
@@ -576,7 +571,7 @@ func TestUpdateRecord(t *testing.T) {
 			name: "rename",
 			req: &pb.UpdateRecordRequest{
 				Record: &pb.Record{
-					Name: record.FormatName(result.GetName(), "doesnotexist"),
+					Name: record.FormatName(res.GetName(), "doesnotexist"),
 					Data: &pb.Any{
 						Value: jsonutil.AnyBytes(t, tr),
 					},
@@ -601,7 +596,7 @@ func TestUpdateRecord(t *testing.T) {
 			req: &pb.UpdateRecordRequest{
 				Etag: "invalid etag",
 				Record: &pb.Record{
-					Name: record.FormatName(result.GetName(), "a"),
+					Name: record.FormatName(res.GetName(), "a"),
 					Data: &pb.Any{
 						Value: jsonutil.AnyBytes(t, tr),
 					},
@@ -613,11 +608,11 @@ func TestUpdateRecord(t *testing.T) {
 	for _, tc := range tt {
 		t.Run(tc.name, func(t *testing.T) {
 			var r *pb.Record
-			if tc.record != nil {
+			if tc.rec != nil {
 				var err error
 				r, err = srv.CreateRecord(ctx, &pb.CreateRecordRequest{
-					Parent: result.GetName(),
-					Record: tc.record,
+					Parent: res.GetName(),
+					Record: tc.rec,
 				})
 				if err != nil {
 					t.Fatalf("CreateRecord(): %v", err)
@@ -637,9 +632,8 @@ func TestUpdateRecord(t *testing.T) {
 			}
 
 			proto.Merge(r, tc.diff)
-			r.UpdatedTime = timestamppb.New(clock.Now())
 			r.UpdateTime = timestamppb.New(clock.Now())
-			r.Etag = mockEtag(lastID, r.UpdatedTime.AsTime().UnixNano())
+			r.Etag = mockEtag(lastID, r.UpdateTime.AsTime().UnixNano())
 
 			if diff := cmp.Diff(r, got, protocmp.Transform()); diff != "" {
 				t.Error(diff)
@@ -655,19 +649,19 @@ func TestDeleteRecord(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	result, err := srv.CreateResult(ctx, &pb.CreateResultRequest{
-		Parent: "foo",
+	res, err := srv.CreateResult(ctx, &pb.CreateResultRequest{
+		Parent: result.FormatParent("a", "b"),
 		Result: &pb.Result{
-			Name: "foo/results/bar",
+			Name: result.FormatName(result.FormatParent("a", "b"), "c"),
 		},
 	})
 	if err != nil {
 		t.Fatalf("CreateResult: %v", err)
 	}
 	r, err := srv.CreateRecord(ctx, &pb.CreateRecordRequest{
-		Parent: result.GetName(),
+		Parent: res.GetName(),
 		Record: &pb.Record{
-			Name: recordutil.FormatName(result.GetName(), "baz"),
+			Name: record.FormatName(res.GetName(), "d"),
 		},
 	})
 	if err != nil {
@@ -679,7 +673,7 @@ func TestDeleteRecord(t *testing.T) {
 		if _, err := srv.DeleteRecord(ctx, &pb.DeleteRecordRequest{Name: r.GetName()}); err != nil {
 			t.Fatalf("could not delete record: %v", err)
 		}
-		// Check if the the record is deleted
+		// Check if the record is deleted
 		if r, err := srv.GetRecord(ctx, &pb.GetRecordRequest{Name: r.GetName()}); status.Code(err) != codes.NotFound {
 			t.Fatalf("expected record to be deleted, got: %+v, %v", r, err)
 		}
@@ -705,10 +699,10 @@ func TestListRecords_multiresult(t *testing.T) {
 	records := make([]*pb.Record, 0, 8)
 	for i := 0; i < 2; i++ {
 		for j := 0; j < 2; j++ {
-			result, err := srv.CreateResult(ctx, &pb.CreateResultRequest{
-				Parent: strconv.Itoa(i),
+			res, err := srv.CreateResult(ctx, &pb.CreateResultRequest{
+				Parent: result.FormatParent(strconv.Itoa(i), strconv.Itoa(i)),
 				Result: &pb.Result{
-					Name: fmt.Sprintf("%d/results/%d", i, j),
+					Name: result.FormatName(result.FormatParent(strconv.Itoa(i), strconv.Itoa(i)), strconv.Itoa(j)),
 				},
 			})
 			if err != nil {
@@ -716,9 +710,9 @@ func TestListRecords_multiresult(t *testing.T) {
 			}
 			for k := 0; k < 2; k++ {
 				r, err := srv.CreateRecord(ctx, &pb.CreateRecordRequest{
-					Parent: result.GetName(),
+					Parent: res.GetName(),
 					Record: &pb.Record{
-						Name: recordutil.FormatName(result.GetName(), strconv.Itoa(k)),
+						Name: record.FormatName(res.GetName(), strconv.Itoa(k)),
 					},
 				})
 				if err != nil {
@@ -730,7 +724,7 @@ func TestListRecords_multiresult(t *testing.T) {
 	}
 
 	got, err := srv.ListRecords(ctx, &pb.ListRecordsRequest{
-		Parent: "0/results/-",
+		Parent: record.FormatParent("0", "0", "-"),
 	})
 	if err != nil {
 		t.Fatalf("ListRecords(): %v", err)

@@ -29,19 +29,25 @@ var (
 	ecsContainerEndpoint = "http://169.254.170.2" // not constant to allow for swapping during unit-testing
 )
 
-// resolveCredentials extracts a credential provider from slice of config
-// sources.
+// resolveCredentials extracts a credential provider from slice of config sources.
 //
-// If an explicit credential provider is not found the resolver will fallback
-// to resolving credentials by extracting a credential provider from EnvConfig
-// and SharedConfig.
+// If an explict credential provider is not found the resolver will fallback to resolving
+// credentials by extracting a credential provider from EnvConfig and SharedConfig.
 func resolveCredentials(ctx context.Context, cfg *aws.Config, configs configs) error {
 	found, err := resolveCredentialProvider(ctx, cfg, configs)
-	if found || err != nil {
+	if err != nil {
+		return err
+	}
+	if found {
+		return nil
+	}
+
+	err = resolveCredentialChain(ctx, cfg, configs)
+	if err != nil {
 		return err
 	}
 
-	return resolveCredentialChain(ctx, cfg, configs)
+	return nil
 }
 
 // resolveCredentialProvider extracts the first instance of Credentials from the
@@ -55,8 +61,11 @@ func resolveCredentials(ctx context.Context, cfg *aws.Config, configs configs) e
 // * credentialsProviderProvider
 func resolveCredentialProvider(ctx context.Context, cfg *aws.Config, configs configs) (bool, error) {
 	credProvider, found, err := getCredentialsProvider(ctx, configs)
-	if !found || err != nil {
+	if err != nil {
 		return false, err
+	}
+	if !found {
+		return false, nil
 	}
 
 	cfg.Credentials, err = wrapWithCredentialsCache(ctx, configs, credProvider)
@@ -445,7 +454,7 @@ func wrapWithCredentialsCache(
 		return provider, nil
 	}
 
-	credCacheOptions, optionsFound, err := getCredentialsCacheOptionsProvider(ctx, cfgs)
+	credCacheOptions, found, err := getCredentialsCacheOptionsProvider(ctx, cfgs)
 	if err != nil {
 		return nil, err
 	}
@@ -453,7 +462,7 @@ func wrapWithCredentialsCache(
 	// force allocation of a new slice if the additional options are
 	// needed, to prevent overwriting the passed in slice of options.
 	optFns = optFns[:len(optFns):len(optFns)]
-	if optionsFound {
+	if found {
 		optFns = append(optFns, credCacheOptions)
 	}
 

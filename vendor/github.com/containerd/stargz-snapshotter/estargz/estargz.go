@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"io/ioutil"
 	"os"
 	"path"
 	"sort"
@@ -578,7 +579,7 @@ func (fr *fileReader) ReadAt(p []byte, off int64) (n int, err error) {
 		return 0, fmt.Errorf("fileReader.ReadAt.decompressor.Reader: %v", err)
 	}
 	defer dr.Close()
-	if n, err := io.CopyN(io.Discard, dr, off); n != off || err != nil {
+	if n, err := io.CopyN(ioutil.Discard, dr, off); n != off || err != nil {
 		return 0, fmt.Errorf("discard of %d bytes = %v, %v", off, n, err)
 	}
 	return io.ReadFull(dr, p)
@@ -932,7 +933,7 @@ func (w *Writer) appendTar(r io.Reader, lossless bool) error {
 			}
 		}
 	}
-	remainDest := io.Discard
+	remainDest := ioutil.Discard
 	if lossless {
 		remainDest = dst // Preserve the remaining bytes in lossless mode
 	}

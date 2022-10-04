@@ -142,7 +142,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, o results.Object) error {
 		}
 
 		// We haven't hit the grace period yet - reenqueue the key for processing later.
-		if s := clock.Since(record.GetUpdatedTime().AsTime()); s < r.cfg.GetCompletedResourceGracePeriod() {
+		if s := clock.Since(record.GetUpdateTime().AsTime()); s < r.cfg.GetCompletedResourceGracePeriod() {
 			log.Infof("object is not ready for deletion - grace period: %v, time since completion: %v", r.cfg.GetCompletedResourceGracePeriod(), s)
 			r.enqueue(o, r.cfg.GetCompletedResourceGracePeriod())
 			return nil

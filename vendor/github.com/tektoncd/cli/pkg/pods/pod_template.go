@@ -18,12 +18,12 @@ import (
 	"net/http"
 
 	"github.com/tektoncd/cli/pkg/file"
-	"github.com/tektoncd/pipeline/pkg/apis/pipeline/pod"
+	"github.com/tektoncd/pipeline/pkg/apis/pipeline/v1beta1"
 	"sigs.k8s.io/yaml"
 )
 
-func ParsePodTemplate(httpClient http.Client, podTemplateLocation string, validate file.TypeValidator, errorMsg error) (pod.PodTemplate, error) {
-	podTemplate := pod.PodTemplate{}
+func ParsePodTemplate(httpClient http.Client, podTemplateLocation string, validate file.TypeValidator, errorMsg error) (v1beta1.PodTemplate, error) {
+	podTemplate := v1beta1.PodTemplate{}
 	b, err := file.LoadFileContent(httpClient, podTemplateLocation, validate, errorMsg)
 	if err != nil {
 		return podTemplate, err

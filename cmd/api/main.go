@@ -19,25 +19,23 @@ package main
 import (
 	"context"
 	"fmt"
+	"k8s.io/client-go/tools/clientcmd"
 	"log"
 	"net"
 	"net/http"
 	"path"
-
-	"github.com/tektoncd/results/pkg/api/server/v1alpha2/auth"
-	_ "go.uber.org/automaxprocs"
-	"google.golang.org/grpc/credentials/insecure"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
 
 	prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/viper"
 	v1alpha2 "github.com/tektoncd/results/pkg/api/server/v1alpha2"
+	"github.com/tektoncd/results/pkg/api/server/v1alpha2/auth"
 	v1alpha2pb "github.com/tektoncd/results/proto/v1alpha2/results_go_proto"
+	_ "go.uber.org/automaxprocs"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
@@ -53,6 +51,7 @@ type ConfigFile struct {
 	DB_NAME               string `mapstructure:"DB_NAME"`
 	DB_SSLMODE            string `mapstructure:"DB_SSLMODE"`
 	GRPC_PORT             string `mapstructure:"GRPC_PORT"`
+	KCP_CONFIG            string `mapstructure:"KCP_CONFIG"`
 	REST_PORT             string `mapstructure:"REST_PORT"`
 	PROMETHEUS_PORT       string `mapstructure:"PROMETHEUS_PORT"`
 	TLS_HOSTNAME_OVERRIDE string `mapstructure:"TLS_HOSTNAME_OVERRIDE"`
@@ -61,7 +60,9 @@ type ConfigFile struct {
 
 func main() {
 
-	viper.AddConfigPath("./env")
+	viper.AddConfigPath(".")
+	viper.AddConfigPath("./config/env")
+	viper.AddConfigPath("/etc/config/server")
 	viper.SetConfigName("config")
 	viper.SetConfigType("env")
 
@@ -92,16 +93,6 @@ func main() {
 		log.Fatalf("Failed to open the results.db: %v", err)
 	}
 
-	// Create k8s client
-	config, err := rest.InClusterConfig()
-	if err != nil {
-		log.Fatal("Error getting kubernetes client config:", err)
-	}
-	k8s, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		log.Fatal("Error creating kubernetes clientset:", err)
-	}
-
 	// Load TLS cert for server
 	creds, tlsError := credentials.NewServerTLSFromFile(path.Join(configFile.TLS_PATH, "tls.crt"), path.Join(configFile.TLS_PATH, "tls.key"))
 	if tlsError != nil {
@@ -111,7 +102,11 @@ func main() {
 	}
 
 	// Register API server(s)
-	v1a2, err := v1alpha2.New(db, v1alpha2.WithAuth(auth.NewRBAC(k8s)))
+	config, err := clientcmd.BuildConfigFromFlags("", configFile.KCP_CONFIG)
+	if err != nil {
+		log.Fatalf("Error loading kube config: %v", err)
+	}
+	v1a2, err := v1alpha2.New(db, v1alpha2.WithAuth(auth.NewKCP(config)))
 	if err != nil {
 		log.Fatalf("Failed to create server: %v", err)
 	}

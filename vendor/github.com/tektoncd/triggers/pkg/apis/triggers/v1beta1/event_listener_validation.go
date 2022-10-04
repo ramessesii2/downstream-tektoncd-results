@@ -41,10 +41,6 @@ var (
 
 // Validate EventListener.
 func (e *EventListener) Validate(ctx context.Context) *apis.FieldError {
-	if apis.IsInDelete(ctx) {
-		return nil
-	}
-
 	var errs *apis.FieldError
 	if len(e.ObjectMeta.Name) > 60 {
 		// Since `el-` is added as the prefix of EventListener services, the name of EventListener must be no more than 60 characters long.
@@ -55,6 +51,9 @@ func (e *EventListener) Validate(ctx context.Context) *apis.FieldError {
 		errs = errs.Also(triggers.ValidateAnnotations(e.GetObjectMeta().GetAnnotations()))
 	}
 
+	if apis.IsInDelete(ctx) {
+		return nil
+	}
 	return errs.Also(e.Spec.validate(ctx))
 }
 

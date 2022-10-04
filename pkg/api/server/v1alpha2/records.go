@@ -16,7 +16,6 @@ package server
 
 import (
 	"context"
-
 	"github.com/golang/protobuf/ptypes/empty"
 	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/checker/decls"
@@ -26,7 +25,6 @@ import (
 	"github.com/tektoncd/results/pkg/api/server/db/pagination"
 	"github.com/tektoncd/results/pkg/api/server/v1alpha2/auth"
 	"github.com/tektoncd/results/pkg/api/server/v1alpha2/record"
-	"github.com/tektoncd/results/pkg/api/server/v1alpha2/result"
 	"github.com/tektoncd/results/pkg/internal/protoutil"
 	pb "github.com/tektoncd/results/proto/v1alpha2/results_go_proto"
 	"google.golang.org/grpc/codes"
@@ -39,23 +37,29 @@ import (
 func (s *Server) CreateRecord(ctx context.Context, req *pb.CreateRecordRequest) (*pb.Record, error) {
 	r := req.GetRecord()
 
-	// Validate the incoming request
-	parent, resultName, name, err := record.ParseName(r.GetName())
+	//Parse input request
+	cluster, namespace, result, _, err := record.ParseName(r.GetName())
 	if err != nil {
-		return nil, err
+		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	if req.GetParent() != result.FormatName(parent, resultName) {
+
+	if req.GetParent() != record.FormatParent(cluster, namespace, result) {
 		return nil, status.Error(codes.InvalidArgument, "requested parent does not match resource name")
 	}
-	if err := s.auth.Check(ctx, parent, auth.ResourceRecords, auth.PermissionCreate); err != nil {
+
+	// Check access
+	if err := s.auth.Check(ctx, cluster, namespace, auth.ResourceRecords, auth.PermissionCreate); err != nil {
 		return nil, err
 	}
 
+	// Format parent name
+	parent := record.FormatParentDB(cluster, namespace)
+
 	// Look up the result ID from the name. This does not have to happen
 	// transactionally with the insert since name<->ID mappings are immutable,
-	// and if the the parent result is deleted mid-request, the insert should
+	// and if the parent result is deleted mid-request, the insert should
 	// fail due to foreign key constraints.
-	resultID, err := s.getResultID(ctx, parent, resultName)
+	resultID, err := s.getResultID(ctx, parent, result)
 	if err != nil {
 		return nil, err
 	}
@@ -64,15 +68,15 @@ func (s *Server) CreateRecord(ctx context.Context, req *pb.CreateRecordRequest) 
 	protoutil.ClearOutputOnly(r)
 	r.Id = uid()
 	ts := timestamppb.New(clock.Now())
-	r.CreatedTime = ts
 	r.CreateTime = ts
-	r.UpdatedTime = ts
 	r.UpdateTime = ts
 
-	store, err := record.ToStorage(parent, resultName, resultID, name, req.GetRecord())
+	// Insert record in storage
+	store, err := record.ToStorage(r)
 	if err != nil {
 		return nil, err
 	}
+	store.ResultID = resultID
 	if err := record.UpdateEtag(store); err != nil {
 		return nil, err
 	}
@@ -107,18 +111,26 @@ func (s *Server) getResultIDImpl(ctx context.Context, parent, result string) (st
 
 // GetRecord returns a single Record.
 func (s *Server) GetRecord(ctx context.Context, req *pb.GetRecordRequest) (*pb.Record, error) {
-	parent, result, name, err := record.ParseName(req.GetName())
+	//Parse input request
+	cluster, namespace, resultName, name, err := record.ParseName(req.GetName())
 	if err != nil {
-		return nil, err
+		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	if err := s.auth.Check(ctx, parent, auth.ResourceRecords, auth.PermissionGet); err != nil {
+
+	// Check access
+	if err := s.auth.Check(ctx, cluster, namespace, auth.ResourceRecords, auth.PermissionGet); err != nil {
 		return nil, err
 	}
 
-	r, err := getRecord(s.db.WithContext(ctx), parent, result, name)
+	// Format parent name
+	parent := record.FormatParentDB(cluster, namespace)
+
+	// Retrieve record from storage
+	r, err := getRecord(s.db.WithContext(ctx), parent, resultName, name)
 	if err != nil {
 		return nil, err
 	}
+
 	return record.ToAPI(r)
 }
 
@@ -134,12 +146,19 @@ func getRecord(txn *gorm.DB, parent, result, name string) (*db.Record, error) {
 }
 
 func (s *Server) ListRecords(ctx context.Context, req *pb.ListRecordsRequest) (*pb.ListRecordsResponse, error) {
-	if req.GetParent() == "" {
-		return nil, status.Error(codes.InvalidArgument, "parent missing")
+	//Parse input request
+	cluster, namespace, resultName, err := record.ParseParent(req.GetParent())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	if err := s.auth.Check(ctx, req.GetParent(), auth.ResourceRecords, auth.PermissionList); err != nil {
+
+	// Check access
+	if err := s.auth.Check(ctx, cluster, namespace, auth.ResourceRecords, auth.PermissionList); err != nil {
 		return nil, err
 	}
+
+	// Format parent name
+	parent := record.FormatParentDB(cluster, namespace)
 
 	userPageSize, err := pageSize(int(req.GetPageSize()))
 	if err != nil {
@@ -165,7 +184,7 @@ func (s *Server) ListRecords(ctx context.Context, req *pb.ListRecordsRequest) (*
 		return nil, err
 	}
 	// Fetch n+1 items to get the next token.
-	out, err := s.getFilteredPaginatedSortedRecords(ctx, req.GetParent(), start, userPageSize+1, prg, sortOrder)
+	r, err := s.getFilteredPaginatedSortedRecords(ctx, parent, resultName, start, userPageSize+1, prg, sortOrder)
 	if err != nil {
 		return nil, err
 	}
@@ -173,30 +192,25 @@ func (s *Server) ListRecords(ctx context.Context, req *pb.ListRecordsRequest) (*
 	// If we returned the full n+1 items, use the last element as the next page
 	// token.
 	var nextToken string
-	if len(out) > userPageSize {
-		next := out[len(out)-1]
+	if len(r) > userPageSize {
+		next := r[len(r)-1]
 		var err error
 		nextToken, err = pagination.EncodeToken(next.GetId(), req.GetFilter())
 		if err != nil {
 			return nil, err
 		}
-		out = out[:len(out)-1]
+		r = r[:len(r)-1]
 	}
 
 	return &pb.ListRecordsResponse{
-		Records:       out,
+		Records:       r,
 		NextPageToken: nextToken,
 	}, nil
 }
 
 // getFilteredPaginatedRecords returns the specified number of results that
 // match the given CEL program.
-func (s *Server) getFilteredPaginatedSortedRecords(ctx context.Context, parent, start string, pageSize int, prg cel.Program, sortOrder string) ([]*pb.Record, error) {
-	parent, result, err := result.ParseName(parent)
-	if err != nil {
-		return nil, err
-	}
-
+func (s *Server) getFilteredPaginatedSortedRecords(ctx context.Context, parent, result, start string, pageSize int, prg cel.Program, sortOrder string) ([]*pb.Record, error) {
 	out := make([]*pb.Record, 0, pageSize)
 	batcher := pagination.NewBatcher(pageSize, minPageSize, maxPageSize)
 	for len(out) < pageSize {
@@ -236,7 +250,7 @@ func (s *Server) getFilteredPaginatedSortedRecords(ctx context.Context, parent, 
 			}
 		}
 
-		// We fetched less results than requested - this means we've exhausted
+		// We fetched fewer results than requested - this means we've exhausted
 		// all items.
 		if len(dbrecords) < batchSize {
 			break
@@ -251,21 +265,27 @@ func (s *Server) getFilteredPaginatedSortedRecords(ctx context.Context, parent, 
 
 // UpdateRecord updates a record in the database.
 func (s *Server) UpdateRecord(ctx context.Context, req *pb.UpdateRecordRequest) (*pb.Record, error) {
-	in := req.GetRecord()
+	rec := req.GetRecord()
 
-	parent, result, name, err := record.ParseName(in.GetName())
+	//Parse input request
+	cluster, namespace, resultName, name, err := record.ParseName(rec.GetName())
 	if err != nil {
-		return nil, err
+		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	if err := s.auth.Check(ctx, parent, auth.ResourceRecords, auth.PermissionUpdate); err != nil {
+
+	// Check access
+	if err := s.auth.Check(ctx, cluster, namespace, auth.ResourceRecords, auth.PermissionUpdate); err != nil {
 		return nil, err
 	}
 
-	protoutil.ClearOutputOnly(in)
+	// Format parent name
+	parent := record.FormatParentDB(cluster, namespace)
+
+	protoutil.ClearOutputOnly(rec)
 
 	var out *pb.Record
-	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		r, err := getRecord(tx, parent, result, name)
+	err = s.db.WithContext(ctx).Transaction(func(db *gorm.DB) error {
+		r, err := getRecord(db, parent, resultName, name)
 		if err != nil {
 			return err
 		}
@@ -277,31 +297,30 @@ func (s *Server) UpdateRecord(ctx context.Context, req *pb.UpdateRecordRequest) 
 		}
 
 		// Merge existing data with user request.
-		pb, err := record.ToAPI(r)
+		api, err := record.ToAPI(r)
 		if err != nil {
 			return err
 		}
 		// TODO: field mask support.
-		proto.Merge(pb, in)
+		proto.Merge(api, rec)
 
-		updateTime := timestamppb.New(clock.Now())
-		pb.UpdatedTime = updateTime
-		pb.UpdateTime = updateTime
+		api.UpdateTime = timestamppb.New(clock.Now())
 
 		// Convert back to storage and store.
-		s, err := record.ToStorage(r.Parent, r.ResultName, r.ResultID, r.Name, pb)
+		s, err := record.ToStorage(api)
 		if err != nil {
 			return err
 		}
+		s.ResultID = r.ResultID
 		if err := record.UpdateEtag(s); err != nil {
 			return err
 		}
-		if err := errors.Wrap(tx.Save(s).Error); err != nil {
+		if err := errors.Wrap(db.Save(s).Error); err != nil {
 			return err
 		}
 
-		pb.Etag = s.Etag
-		out = pb
+		api.Etag = s.Etag
+		out = api
 		return nil
 	})
 	return out, err
@@ -309,19 +328,25 @@ func (s *Server) UpdateRecord(ctx context.Context, req *pb.UpdateRecordRequest) 
 
 // DeleteRecord deletes a given record.
 func (s *Server) DeleteRecord(ctx context.Context, req *pb.DeleteRecordRequest) (*empty.Empty, error) {
-	parent, result, name, err := record.ParseName(req.GetName())
+	//Parse input request
+	cluster, namespace, resultName, name, err := record.ParseName(req.GetName())
 	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+
+	// Check access
+	if err := s.auth.Check(ctx, cluster, namespace, auth.ResourceRecords, auth.PermissionDelete); err != nil {
 		return nil, err
 	}
-	if err := s.auth.Check(ctx, parent, auth.ResourceRecords, auth.PermissionDelete); err != nil {
-		return &empty.Empty{}, err
-	}
+
+	// Format parent name
+	parent := record.FormatParentDB(cluster, namespace)
 
 	// First get the current record. This ensures that we return NOT_FOUND if
 	// the entry is already deleted.
-	// This does not need to be done in the same transaction as the delete,
+	// This does not need to be done in the same transaction as delete,
 	// since the identifiers are immutable.
-	r, err := getRecord(s.db, parent, result, name)
+	r, err := getRecord(s.db, parent, resultName, name)
 	if err != nil {
 		return &empty.Empty{}, err
 	}
