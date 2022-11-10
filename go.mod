@@ -20,6 +20,7 @@ require (
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.11.2
 	github.com/jackc/pgconn v1.11.0
 	github.com/jonboulle/clockwork v0.3.0
+	github.com/kcp-dev/kcp v0.9.0
 	github.com/kcp-dev/logicalcluster/v2 v2.0.0-alpha.3
 	github.com/mattn/go-sqlite3 v2.0.3+incompatible
 	github.com/prometheus/client_golang v1.13.0
@@ -92,7 +93,7 @@ require (
 	github.com/docker/distribution v2.8.1+incompatible // indirect
 	github.com/docker/docker v20.10.18+incompatible // indirect
 	github.com/docker/docker-credential-helpers v0.6.4 // indirect
-	github.com/evanphx/json-patch v4.12.0+incompatible // indirect
+	github.com/evanphx/json-patch v5.6.0+incompatible // indirect
 	github.com/evanphx/json-patch/v5 v5.6.0 // indirect
 	github.com/fsnotify/fsnotify v1.5.4 // indirect
 	github.com/gdamore/encoding v1.0.0 // indirect
@@ -137,6 +138,7 @@ require (
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51 // indirect
+	github.com/kcp-dev/kcp/pkg/apis v0.0.0-00010101000000-000000000000 // indirect
 	github.com/kelseyhightower/envconfig v1.4.0 // indirect
 	github.com/klauspost/compress v1.15.8 // indirect
 	github.com/ktr0731/go-fuzzyfinder v0.6.0 // indirect
@@ -144,6 +146,7 @@ require (
 	github.com/lucasb-eyer/go-colorful v1.0.3 // indirect
 	github.com/magiconair/properties v1.8.6 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
+	github.com/martinlindhe/base36 v1.1.1 // indirect
 	github.com/mattn/go-colorable v0.1.12 // indirect
 	github.com/mattn/go-isatty v0.0.14 // indirect
 	github.com/mattn/go-runewidth v0.0.13 // indirect
@@ -156,6 +159,7 @@ require (
 	github.com/monochromegane/go-gitignore v0.0.0-20200626010858-205db1a8cc00 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/nsf/termbox-go v0.0.0-20201124104050-ed494de23a00 // indirect
+	github.com/onsi/gomega v1.19.0 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.0.3-0.20220114050600-8b9d41f48198 // indirect
 	github.com/openzipkin/zipkin-go v0.3.0 // indirect
@@ -174,7 +178,7 @@ require (
 	github.com/spf13/cast v1.5.0 // indirect
 	github.com/spf13/cobra v1.5.0 // indirect
 	github.com/spf13/jwalterweatherman v1.1.0 // indirect
-	github.com/spf13/pflag v1.0.5 // indirect
+	github.com/spf13/pflag v1.0.6-0.20210604193023-d5e0c0615ace // indirect
 	github.com/stoewer/go-strcase v1.2.0 // indirect
 	github.com/stretchr/testify v1.8.0 // indirect
 	github.com/subosito/gotenv v1.4.1 // indirect
@@ -199,7 +203,7 @@ require (
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	k8s.io/apiextensions-apiserver v0.24.4 // indirect
-	k8s.io/cli-runtime v0.23.9 // indirect
+	k8s.io/cli-runtime v0.24.3 // indirect
 	k8s.io/klog/v2 v2.70.2-0.20220707122935-0990e81f1a8f // indirect
 	k8s.io/kube-openapi v0.0.0-20220328201542-3ee0da9b0b42 // indirect
 	k8s.io/utils v0.0.0-20220210201930-3a6ce19ff2f9 // indirect
@@ -210,7 +214,7 @@ require (
 )
 
 replace (
-	github.com/kcp-dev/kcp/pkg/apis => github.com/kcp-dev/kcp/pkg/apis v0.6.3
+	github.com/kcp-dev/kcp/pkg/apis => github.com/kcp-dev/kcp/pkg/apis v0.9.0
 	k8s.io/api => github.com/kcp-dev/kubernetes/staging/src/k8s.io/api v0.0.0-20220915135949-eeba459ad2a1
 	k8s.io/apiextensions-apiserver => github.com/kcp-dev/kubernetes/staging/src/k8s.io/apiextensions-apiserver v0.0.0-20220915135949-eeba459ad2a1
 	k8s.io/apimachinery => github.com/kcp-dev/kubernetes/staging/src/k8s.io/apimachinery v0.0.0-20220915135949-eeba459ad2a1
