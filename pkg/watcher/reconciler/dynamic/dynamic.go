@@ -21,9 +21,11 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/jonboulle/clockwork"
+	"github.com/kcp-dev/kcp/pkg/syncer/shared"
 	"github.com/tektoncd/cli/pkg/cli"
 	tknlog "github.com/tektoncd/cli/pkg/log"
 	tknopts "github.com/tektoncd/cli/pkg/options"
+	resultapi "github.com/tektoncd/results/pkg/api/server/v1alpha2/result"
 	logwriter "github.com/tektoncd/results/pkg/logwriter"
 	"github.com/tektoncd/results/pkg/watcher/convert"
 	"github.com/tektoncd/results/pkg/watcher/reconciler"
@@ -83,14 +85,35 @@ func (r *Reconciler) Reconcile(ctx context.Context, o results.Object) error {
 		r.log.Infof("Post-GVK Object: %v", o)
 	}
 
+	// Get namespace name from object
+	ns, err := r.cfg.KubeClient.CoreV1().Namespaces().Get(ctx, o.GetNamespace(), metav1.GetOptions{})
+	if err != nil {
+		r.log.Errorf("error fetching namespace: %v", err)
+		return err
+	}
+
+	// Get KCP namespace locator
+	nl, ok, err := shared.LocatorFromAnnotations(ns.Annotations)
+	if err != nil {
+		r.log.Errorf("error fetching namespace: %v", err)
+		return err
+	}
+	if !ok {
+		r.log.Info("skipping resource: object not in KCP namespace")
+		return nil
+	}
+
+	// Format parent as per API specs
+	parent := resultapi.FormatParent(nl.Workspace.String(), nl.Namespace)
+
 	// Update record.
-	result, record, err := r.resultsClient.Put(ctx, o)
+	result, record, err := r.resultsClient.Put(ctx, parent, o)
 	if err != nil {
 		r.log.Errorf("error updating Record: %v", err)
 		return err
 	}
 
-	if err := r.handleResultLog(o, record); err != nil {
+	if err := r.handleResultLog(parent, o, record); err != nil {
 		return err
 	}
 
@@ -103,7 +126,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, o results.Object) error {
 	return r.deleteObject(o, record)
 }
 
-func (r *Reconciler) handleResultLog(o results.Object, record *pb.Record) error {
+func (r *Reconciler) handleResultLog(parent string, o results.Object, record *pb.Record) error {
 	condition := o.GetStatusCondition().GetCondition(apis.ConditionSucceeded)
 	if !o.GetObjectKind().GroupVersionKind().Empty() &&
 		o.GetObjectKind().GroupVersionKind().Kind == "TaskRun" &&
@@ -111,7 +134,7 @@ func (r *Reconciler) handleResultLog(o results.Object, record *pb.Record) error 
 		condition.Type == "Succeeded" &&
 		(condition.Reason == "Succeeded" || condition.Reason == "Failed") {
 
-		isExists, err := r.resultsClient.IsLogRecordExists(r.ctx, o)
+		isExists, err := r.resultsClient.IsLogRecordExists(r.ctx, parent, o)
 		if err != nil {
 			return err
 		}
@@ -122,7 +145,7 @@ func (r *Reconciler) handleResultLog(o results.Object, record *pb.Record) error 
 
 		// Create a log record if the object has/supports logs
 		// For now this is just TaskRuns.
-		_, logRec, err := r.resultsClient.PutLog(r.ctx, o)
+		_, logRec, err := r.resultsClient.PutLog(r.ctx, parent, o)
 		if err != nil {
 			r.log.Errorf("error creating TaskRunLog Record: %v", err)
 			return err
