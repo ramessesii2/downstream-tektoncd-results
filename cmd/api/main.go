@@ -24,6 +24,7 @@ import (
 	"net"
 	"net/http"
 	"path"
+	"k8s.io/client-go/rest"
 
 	prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
@@ -45,8 +46,7 @@ import (
 )
 
 func main() {
-
-	viper.AddConfigPath(".")
+	// points to env file folder for local development
 	viper.AddConfigPath("./config/env")
 	viper.AddConfigPath("/etc/config/server")
 	viper.SetConfigName("config")
@@ -90,12 +90,22 @@ func main() {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Register API server(s)
-	config, err := clientcmd.BuildConfigFromFlags("", configFile.KCP_CONFIG)
-	if err != nil {
-		log.Fatalf("Error loading kube config: %v", err)
+	var authChecker auth.Checker
+	if len(configFile.KCP_CONFIG) == 0 {
+		config, err := rest.InClusterConfig()
+		if err != nil {
+			log.Fatal("Error getting kubernetes client config:", err)
+		}
+		authChecker = auth.NewRBAC(config)
+	} else {
+		config, err := clientcmd.BuildConfigFromFlags("", configFile.KCP_CONFIG)
+		if err != nil {
+			log.Fatalf("Error loading kube config: %v", err)
+		}
+		authChecker = auth.NewKCP(config)
 	}
-	v1a2, err := v1alpha2.New(db, ctx, v1alpha2.WithAuth(auth.NewKCP(config)))
+
+	v1a2, err := v1alpha2.New(db, ctx, v1alpha2.WithAuth(authChecker), v1alpha2.WithConf(configFile))
 	if err != nil {
 		log.Fatalf("Failed to create server: %v", err)
 	}
