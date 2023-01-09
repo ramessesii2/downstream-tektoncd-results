@@ -30,6 +30,8 @@ trap cleanup EXIT
 main() {
     export KO_DOCKER_REPO="kind.local"
     export KIND_CLUSTER_NAME="tekton-results"
+    export SA_TOKEN_PATH=${SA_TOKEN_PATH:-"/tmp/tekton-results/tokens"}
+    export SSL_CERT_PATH=${SSL_CERT_PATH:="/tmp/tekton-results/ssl"}
 
     REPO="$(git rev-parse --show-toplevel)"
 
@@ -38,7 +40,7 @@ main() {
 
     # Build static binaries; otherwise go test complains.
     export CGO_ENABLED=0
-    go test --tags=e2e ${REPO}/test/e2e/...
+    go test -v -count=1 --tags=e2e ${REPO}/test/e2e/...
 }
 
 main
