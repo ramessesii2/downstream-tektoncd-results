@@ -1,6 +1,7 @@
 <!--
 
 ---
+title: "Results"
 linkTitle: "Results"
 weight: 2
 description: >
@@ -68,7 +69,7 @@ Tekton Results is composed of 2 main components:
 ![results data model](datamodel.png)
 
 - Records are individual instances of data. These will commonly be execution
-  data (e.g. PipelineRun, TaskRuns), but could also reference additional data
+  data (e.g. PipelineRun, TaskRuns, Logs), but could also reference additional data
   about the event/execution. Records are intended to be flexible to support
   arbitrary information tools want to provide around a CI event.
 - Results are aggregators of Records, allowing users to refer to groups of
