@@ -1,0 +1,296 @@
+package adapter
+
+import (
+	"context"
+	"crypto/tls"
+	"fmt"
+	"net/http"
+	"path"
+	"strings"
+	"time"
+
+	prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/health"
+	"google.golang.org/grpc/reflection"
+	"google.golang.org/grpc/status"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+
+	cloudevents "github.com/cloudevents/sdk-go/v2"
+	"github.com/golang-jwt/jwt/v4"
+	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
+	grpc_auth "github.com/grpc-ecosystem/go-grpc-middleware/auth"
+	grpc_zap "github.com/grpc-ecosystem/go-grpc-middleware/logging/zap"
+	"github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap"
+	grpc_ctxtags "github.com/grpc-ecosystem/go-grpc-middleware/tags"
+	"github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/recovery"
+	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/tektoncd/results/pkg/api/server/config"
+	v1alpha2 "github.com/tektoncd/results/pkg/api/server/v1alpha2"
+	"github.com/tektoncd/results/pkg/api/server/v1alpha2/auth"
+	"github.com/tektoncd/results/pkg/api/server/v1alpha2/auth/impersonation"
+	v1alpha2pb "github.com/tektoncd/results/proto/v1alpha2/results_go_proto"
+	_ "go.uber.org/automaxprocs"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	gormLogger "gorm.io/gorm/logger"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"knative.dev/eventing/pkg/adapter/v2"
+	"knative.dev/pkg/logging"
+)
+
+type envConfig struct {
+	adapter.EnvConfig
+}
+
+func NewEnvConfig() adapter.EnvConfigAccessor {
+	return &envConfig{}
+}
+
+// resultAdapter implements the knative adapter
+type resultAdapter struct {
+	Logger       *zap.SugaredLogger
+	serverConfig *config.Config
+}
+
+var _ adapter.Adapter = (*resultAdapter)(nil)
+
+func New(serverConfig *config.Config) adapter.AdapterConstructor {
+	return func(ctx context.Context, processed adapter.EnvConfigAccessor, ceClient cloudevents.Client) adapter.Adapter {
+		return &resultAdapter{
+			Logger:       logging.FromContext(ctx),
+			serverConfig: serverConfig,
+		}
+	}
+}
+
+func (r *resultAdapter) Start(ctx context.Context) error {
+
+	// Load server TLS
+	certFile := path.Join(r.serverConfig.TLS_PATH, "tls.crt")
+	keyFile := path.Join(r.serverConfig.TLS_PATH, "tls.key")
+	creds, tlsError := credentials.NewServerTLSFromFile(certFile, keyFile)
+	if tlsError != nil {
+		r.Logger.Errorf("Error loading server TLS: %v", tlsError)
+		r.Logger.Warn("TLS will be disabled")
+		creds = insecure.NewCredentials()
+	}
+
+	if r.serverConfig.DB_USER == "" || r.serverConfig.DB_PASSWORD == "" {
+		r.Logger.Fatal("Must provide both DB_USER and DB_PASSWORD")
+	}
+
+	// Connect to the database.
+	// DSN derived from https://pkg.go.dev/gorm.io/driver/postgres
+
+	var db *gorm.DB
+	var err error
+	dbURI := fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s sslmode=%s", r.serverConfig.DB_HOST, r.serverConfig.DB_USER, r.serverConfig.DB_PASSWORD, r.serverConfig.DB_NAME, r.serverConfig.DB_PORT, r.serverConfig.DB_SSLMODE)
+	gormConfig := &gorm.Config{}
+	if r.Logger.Level() != zap.DebugLevel {
+		gormConfig.Logger = gormLogger.Default.LogMode(gormLogger.Silent)
+	}
+	// Retry database connection, sometimes the database is not ready to accept connection
+	err = wait.PollImmediate(10*time.Second, 2*time.Minute, func() (bool, error) {
+		db, err = gorm.Open(postgres.Open(dbURI), gormConfig)
+		if err != nil {
+			r.Logger.Warnf("Error connecting to database (retrying in 10s): %v", err)
+			return false, nil
+		}
+		return true, nil
+	})
+	if err != nil {
+		r.Logger.Fatalf("Failed to connect to database: %v", err)
+	}
+	// Create the authorization authCheck
+	var authCheck auth.Checker
+	var serverMuxOptions []runtime.ServeMuxOption
+	if r.serverConfig.AUTH_DISABLE {
+		r.Logger.Warn("Kubernetes RBAC authorization check disabled - all requests will be allowed by the API server")
+		authCheck = &auth.AllowAll{}
+	} else {
+		r.Logger.Info("Kubernetes RBAC authorization check enabled")
+		// Create k8s client
+		k8sConfig, err := rest.InClusterConfig()
+		if err != nil {
+			r.Logger.Fatal("Error getting kubernetes client config:", err)
+		}
+		k8s, err := kubernetes.NewForConfig(k8sConfig)
+		if err != nil {
+			r.Logger.Fatal("Error creating kubernetes clientset:", err)
+		}
+
+		if r.serverConfig.AUTH_IMPERSONATE {
+			r.Logger.Info("Kubernetes RBAC impersonation enabled")
+			serverMuxOptions = append(serverMuxOptions, runtime.WithIncomingHeaderMatcher(impersonation.HeaderMatcher))
+		}
+		authCheck = auth.NewRBAC(k8s, auth.WithImpersonation(r.serverConfig.AUTH_IMPERSONATE))
+	}
+
+	// Register API server(s)
+	v1a2, err := v1alpha2.New(r.serverConfig, r.Logger, db, v1alpha2.WithAuth(authCheck))
+	if err != nil {
+		r.Logger.Fatalf("Failed to create server: %v", err)
+	}
+
+	// Shared options for the Logger, with a custom gRPC code to log level function.
+	zapOpts := []grpc_zap.Option{
+		grpc_zap.WithDecider(func(fullMethodName string, err error) bool {
+			return fullMethodName != healthpb.Health_Check_FullMethodName
+		}),
+		grpc_zap.WithDurationField(func(duration time.Duration) zapcore.Field {
+			return zap.Int64("grpc.time_duration_in_ms", duration.Milliseconds())
+		}),
+	}
+
+	// Customize Logger, so it can be passed to the gRPC interceptors
+	grpcLogger := r.Logger.Desugar().With(zap.Bool("grpc.auth_disabled", r.serverConfig.AUTH_DISABLE))
+
+	gs := grpc.NewServer(
+		grpc.Creds(creds),
+		grpc_middleware.WithUnaryServerChain(
+			// The grpc_ctxtags context updater should be before everything else
+			grpc_ctxtags.UnaryServerInterceptor(grpc_ctxtags.WithFieldExtractor(grpc_ctxtags.CodeGenRequestFieldExtractor)),
+			grpc_zap.UnaryServerInterceptor(grpcLogger, zapOpts...),
+			grpc_auth.UnaryServerInterceptor(determineAuth),
+			prometheus.UnaryServerInterceptor,
+			recovery.UnaryServerInterceptor(recovery.WithRecoveryHandler(recoveryHandler)),
+		),
+		grpc_middleware.WithStreamServerChain(
+			// The grpc_ctxtags context updater should be before everything else
+			grpc_ctxtags.StreamServerInterceptor(grpc_ctxtags.WithFieldExtractor(grpc_ctxtags.CodeGenRequestFieldExtractor)),
+			grpc_zap.StreamServerInterceptor(grpcLogger, zapOpts...),
+			grpc_auth.StreamServerInterceptor(determineAuth),
+			prometheus.StreamServerInterceptor,
+			recovery.StreamServerInterceptor(recovery.WithRecoveryHandler(recoveryHandler)),
+		),
+	)
+	v1alpha2pb.RegisterResultsServer(gs, v1a2)
+	if r.serverConfig.LOGS_API {
+		v1alpha2pb.RegisterLogsServer(gs, v1a2)
+	}
+
+	// Allow service reflection - required for grpc_cli ls to work.
+	reflection.Register(gs)
+
+	// Set up health checks.
+	hs := health.NewServer()
+	hs.SetServingStatus("tekton.results.v1alpha2.Results", healthpb.HealthCheckResponse_SERVING)
+	if r.serverConfig.LOGS_API {
+		hs.SetServingStatus("tekton.results.v1alpha2.Logs", healthpb.HealthCheckResponse_SERVING)
+	}
+	healthpb.RegisterHealthServer(gs, hs)
+
+	// Start prometheus metrics server
+	if r.serverConfig.PROMETHEUS_HISTOGRAM {
+		prometheus.EnableHandlingTimeHistogram()
+	}
+	prometheus.Register(gs)
+	http.Handle("/metrics", promhttp.Handler())
+	go func() {
+		r.Logger.Infof("Prometheus server listening on: %s", r.serverConfig.PROMETHEUS_PORT)
+		if err := http.ListenAndServe(":"+r.serverConfig.PROMETHEUS_PORT, promhttp.Handler()); err != nil {
+			r.Logger.Fatalf("Error running Prometheus HTTP handler: %v", err)
+		}
+	}()
+
+	// Load client TLS to dial gRPC
+	if tlsError == nil {
+		// This is an internal client to proxy request from the REST listener to gRPC listener.
+		// So we don't need certificate verification here.
+		creds = credentials.NewTLS(&tls.Config{InsecureSkipVerify: true})
+	}
+
+	// Setup gRPC gateway to proxy request to gRPC health checks
+	clientConn, err := grpc.Dial(":"+r.serverConfig.SERVER_PORT, grpc.WithTransportCredentials(creds))
+	if err != nil {
+		r.Logger.Fatalf("Error dialing gRPC endpoint: %v", err)
+	}
+	serverMuxOptions = append(serverMuxOptions, runtime.WithHealthzEndpoint(healthpb.NewHealthClient(clientConn)))
+
+	// Create server for gRPC gateway
+	// ctx = context.Background()
+	// ctx, cancel := context.WithCancel(ctx)
+	// defer cancel()
+	httpMux := runtime.NewServeMux(serverMuxOptions...)
+	opts := []grpc.DialOption{grpc.WithTransportCredentials(creds)}
+
+	// Register gRPC server endpoint to gRPC gateway
+	err = v1alpha2pb.RegisterResultsHandlerFromEndpoint(ctx, httpMux, ":"+r.serverConfig.SERVER_PORT, opts)
+	if err != nil {
+		r.Logger.Fatal("Error registering gRPC server endpoint for Results API: ", err)
+	}
+
+	if r.serverConfig.LOGS_API {
+		err = v1alpha2pb.RegisterLogsHandlerFromEndpoint(ctx, httpMux, ":"+r.serverConfig.SERVER_PORT, opts)
+		if err != nil {
+			r.Logger.Fatal("Error registering gRPC server endpoints for Logs API: ", err)
+		}
+	}
+
+	// Start server with gRPC and REST handler
+	r.Logger.Infof("gRPC and REST server listening on: %s", r.serverConfig.SERVER_PORT)
+	if tlsError != nil {
+		r.Logger.Fatal(http.ListenAndServe(":"+r.serverConfig.SERVER_PORT, grpcHandler(gs, httpMux)))
+	}
+	r.Logger.Fatal(http.ListenAndServeTLS(":"+r.serverConfig.SERVER_PORT, certFile, keyFile, grpcHandler(gs, httpMux)))
+
+	return nil
+}
+
+// grpcHandler forwards the request to gRPC server based on the Content-Type header.
+func grpcHandler(grpcServer *grpc.Server, httpHandler http.Handler) http.Handler {
+	return h2c.NewHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ProtoMajor == 2 && strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc") {
+			grpcServer.ServeHTTP(w, r)
+		} else {
+			httpHandler.ServeHTTP(w, r)
+		}
+	}), &http2.Server{})
+}
+
+// recoveryHandler returns custom messages when server panics
+func recoveryHandler(p any) error {
+	return status.Errorf(codes.Unknown, "Error: %v", p)
+}
+
+func determineAuth(ctx context.Context) (context.Context, error) {
+	// This code is used to extract values
+	// it is not doing any form of verification.
+
+	tokenString, err := grpc_auth.AuthFromMD(ctx, "bearer")
+	if err != nil {
+		ctxzap.AddFields(ctx,
+			zap.String("grpc.user", "unknown"),
+		)
+		return ctx, nil
+	}
+
+	token, _, err := new(jwt.Parser).ParseUnverified(tokenString, jwt.MapClaims{})
+	if err != nil {
+		ctxzap.AddFields(ctx,
+			zap.String("grpc.user", "unknown"),
+		)
+		return ctx, nil
+	}
+
+	if claims, ok := token.Claims.(jwt.MapClaims); ok {
+		sub := fmt.Sprint(claims["sub"])
+		iss := fmt.Sprint(claims["iss"])
+		ctxzap.AddFields(ctx,
+			zap.String("grpc.user", sub),
+			zap.String("grpc.issuer", iss),
+		)
+	}
+	return ctx, nil
+}

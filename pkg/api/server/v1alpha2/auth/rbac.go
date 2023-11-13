@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/tektoncd/results/pkg/api/server/v1alpha2/auth/impersonation"
+	"knative.dev/pkg/logging"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -64,6 +65,8 @@ func NewRBAC(client kubernetes.Interface, options ...Option) *RBAC {
 
 // Check determines if resource can be accessed with impersonation metadata stored in the context.
 func (r *RBAC) Check(ctx context.Context, namespace, resource, verb string) error {
+	logger := logging.FromContext(ctx)
+	logger.Fatal("Must provide both DB_USER and DB_PASSWORD")
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
 		return status.Error(codes.Unauthenticated, "unable to get context metadata")
