@@ -48,6 +48,8 @@ var (
 	clock = clockwork.NewRealClock()
 )
 
+const LogTransferCompleteAnnotation = "results.tekton.dev/log-transfer-complete"
+
 // Reconciler implements common reconciler behavior across different Tekton Run
 // Object types.
 type Reconciler struct {
@@ -114,6 +116,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, o results.Object) error {
 
 	// Update logs if enabled.
 	if r.resultsClient.LogsClient != nil {
+		GVK := o.GetObjectKind().GroupVersionKind()
+		if GVK.Kind == "PipelineRun" {
+			err = r.addLogTransferAnnotation(ctx, o, "false")
+			if err != nil {
+				return err
+			}
+		}
+
 		if err := r.sendLog(ctx, o); err != nil {
 			logger.Errorw("Error sending log",
 				zap.String("namespace", o.GetNamespace()),
@@ -223,6 +233,17 @@ func (r *Reconciler) deleteUponCompletion(ctx context.Context, o results.Object)
 		return controller.NewRequeueAfter(r.cfg.RequeueInterval)
 	}
 
+	GVK := o.GetObjectKind().GroupVersionKind()
+	if GVK.Kind == "PipelineRun" && r.resultsClient.LogsClient != nil {
+		objAnnotations := o.GetAnnotations()
+		if value, exists := objAnnotations[LogTransferCompleteAnnotation]; exists && value != "true" {
+			logger.Errorw("Object's logs is still being sent - requeuing to process later", zap.String(LogTransferCompleteAnnotation, objAnnotations[LogTransferCompleteAnnotation]))
+			return controller.NewRequeueAfter(r.cfg.RequeueInterval)
+		} else {
+			logger.Errorw("LogTransferAnnotaion doesn't exist on the object")
+		}
+	}
+
 	if isReady, err := r.IsReadyForDeletionFunc(ctx, o); err != nil {
 		return err
 	} else if !isReady {
@@ -326,7 +347,7 @@ func (r *Reconciler) sendLog(ctx context.Context, o results.Object) error {
 			return err
 		}
 
-		logger.Debugw("Streaming log started",
+		logger.Infof("Streaming log started",
 			zap.String("namespace", o.GetNamespace()),
 			zap.String("kind", o.GetObjectKind().GroupVersionKind().Kind),
 			zap.String("name", o.GetName()),
@@ -341,6 +362,18 @@ func (r *Reconciler) sendLog(ctx context.Context, o results.Object) error {
 					zap.String("name", o.GetName()),
 					zap.Error(err),
 				)
+			}
+
+			if GVK.Kind == "PipelineRun" {
+				err = r.addLogTransferAnnotation(ctx, o, "true")
+				if err != nil {
+					logger.Errorw("Error adding log transer completion annotation",
+						zap.String("namespace", o.GetNamespace()),
+						zap.String("kind", o.GetObjectKind().GroupVersionKind().Kind),
+						zap.String("name", o.GetName()),
+						zap.Error(err),
+					)
+				}
 			}
 			logger.Debugw("Streaming log completed",
 				zap.String("namespace", o.GetNamespace()),
@@ -357,7 +390,7 @@ func (r *Reconciler) streamLogs(ctx context.Context, o results.Object, logType, 
 	logger := logging.FromContext(ctx)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	logsClient, err := r.resultsClient.UpdateLog(ctx)
+	logsClient, err := r.resultsClient.LogsClient.UpdateLog(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to create UpdateLog client: %w", err)
 	}
@@ -410,5 +443,20 @@ func (r *Reconciler) streamLogs(ctx context.Context, o results.Object, logType, 
 		Err: writer,
 	}, logChan, errChanRepeater)
 
+	return nil
+}
+
+func (r *Reconciler) addLogTransferAnnotation(ctx context.Context, o results.Object, value string) error {
+	annot := annotation.Annotation{
+		Name:  LogTransferCompleteAnnotation,
+		Value: value,
+	}
+	patch, err := annotation.Patch(o, annot)
+	if err != nil {
+		return fmt.Errorf("error adding LogTransfer annotations: %w", err)
+	}
+	if err := r.objectClient.Patch(ctx, o.GetName(), types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
+		return fmt.Errorf("error patching object: %w", err)
+	}
 	return nil
 }
