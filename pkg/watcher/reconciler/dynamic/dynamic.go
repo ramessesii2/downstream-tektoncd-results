@@ -16,6 +16,7 @@ package dynamic
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -47,6 +48,8 @@ import (
 var (
 	clock = clockwork.NewRealClock()
 )
+
+const PipelineRunFinalizer = "results.tekton.dev/streaming-logs"
 
 // Reconciler implements common reconciler behavior across different Tekton Run
 // Object types.
@@ -114,6 +117,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, o results.Object) error {
 
 	// Update logs if enabled.
 	if r.resultsClient.LogsClient != nil {
+		// Add finalizer for new PipelineRuns
+		err = r.AddFinalizer(ctx, o)
+		if err != nil {
+			return err
+		}
+
 		if err := r.sendLog(ctx, o); err != nil {
 			logger.Errorw("Error sending log",
 				zap.String("namespace", o.GetNamespace()),
@@ -347,6 +356,26 @@ func (r *Reconciler) sendLog(ctx context.Context, o results.Object) error {
 				zap.String("kind", o.GetObjectKind().GroupVersionKind().Kind),
 				zap.String("name", o.GetName()),
 			)
+
+			err = r.RemoveFinalizer(ctx, o)
+			if err != nil {
+				logger.Errorw("Error removing finalizer",
+					zap.String("namespace", o.GetNamespace()),
+					zap.String("kind", o.GetObjectKind().GroupVersionKind().Kind),
+					zap.String("name", o.GetName()),
+					zap.Error(err),
+				)
+			}
+			if o.GetDeletionTimestamp() != nil {
+				err = controller.NewRequeueImmediately()
+				logger.Errorw("Error requing object for deletion",
+					zap.String("namespace", o.GetNamespace()),
+					zap.String("kind", o.GetObjectKind().GroupVersionKind().Kind),
+					zap.String("name", o.GetName()),
+					zap.Error(err),
+				)
+
+			}
 		}()
 	}
 
@@ -411,4 +440,63 @@ func (r *Reconciler) streamLogs(ctx context.Context, o results.Object, logType, 
 	}, logChan, errChanRepeater)
 
 	return nil
+}
+
+func (r *Reconciler) AddFinalizer(ctx context.Context, o results.Object) error {
+	finalizers := o.GetFinalizers()
+	for _, f := range finalizers {
+		if f == PipelineRunFinalizer {
+			return nil
+		}
+	}
+	finalizers = append(finalizers, PipelineRunFinalizer)
+
+	patch, err := finalizerPatch(o, finalizers)
+	if err != nil {
+		return fmt.Errorf("error adding log finalizer: %w", err)
+	}
+
+	if err = r.objectClient.Patch(ctx, o.GetName(), types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
+		return fmt.Errorf("error patching object: %w", err)
+	}
+	return nil
+}
+
+func (r *Reconciler) RemoveFinalizer(ctx context.Context, o results.Object) error {
+	finalizers := o.GetFinalizers()
+	for i, f := range finalizers {
+		if f == PipelineRunFinalizer {
+			finalizers = append(finalizers[:i], finalizers[i+1:]...)
+			patch, err := finalizerPatch(o, finalizers)
+			if err != nil {
+				return fmt.Errorf("error removing log finalizer: %w", err)
+			}
+
+			if err = r.objectClient.Patch(ctx, o.GetName(), types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
+				return fmt.Errorf("error patching object: %w", err)
+			}
+			return nil
+		}
+	}
+	return nil
+
+}
+
+type mergePatch struct {
+	Metadata metadata `json:"metadata"`
+}
+
+type metadata struct {
+	Finalizer []string `json:"finalizers"`
+}
+
+func finalizerPatch(object metav1.Object, finalizers []string) ([]byte, error) {
+	data := mergePatch{
+		Metadata: metadata{
+			Finalizer: []string{},
+		},
+	}
+	data.Metadata.Finalizer = finalizers
+
+	return json.Marshal(data)
 }

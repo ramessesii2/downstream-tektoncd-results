@@ -146,6 +146,7 @@ func (c *Client) ensureResult(ctx context.Context, o Object, opts ...grpc.CallOp
 				return nil, err
 			}
 			var annotations map[string]string
+			// bug with existence of summary annotation
 			if curr != nil && len(curr.Summary.Annotations) != 0 {
 				copyKeys(recordSummaryAnnotations, curr.Summary.Annotations)
 				annotations = curr.Summary.Annotations
