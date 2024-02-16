@@ -15,13 +15,10 @@
 package dynamic
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"time"
-
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-	"k8s.io/apimachinery/pkg/util/wait"
 
 	"github.com/fatih/color"
 	"github.com/jonboulle/clockwork"
@@ -367,12 +364,8 @@ func (r *Reconciler) sendLog(ctx context.Context, o results.Object) error {
 	return nil
 }
 
-func (r *Reconciler) streamLogs(octx context.Context, o results.Object, logType, logName string) error {
-	logger := logging.FromContext(octx)
-	// TODO: Implement configurable timeout based on user feedback analysis.
-	ctx, cancel := context.WithTimeout(octx, 10*time.Minute)
-	// reminder per godoc multiple calls to cancel are OK
-	defer cancel()
+func (r *Reconciler) streamLogs(ctx context.Context, o results.Object, logType, logName string) error {
+	logger := logging.FromContext(ctx)
 	logsClient, err := r.resultsClient.UpdateLog(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to create UpdateLog client: %w", err)
@@ -380,6 +373,8 @@ func (r *Reconciler) streamLogs(octx context.Context, o results.Object, logType,
 
 	writer := logs.NewBufferedWriter(logsClient, logName, logs.DefaultBufferSize)
 
+	inMemWriteBufferStdout := bytes.NewBuffer(make([]byte, 0))
+	inMemWriteBufferStderr := bytes.NewBuffer(make([]byte, 0))
 	tknParams := &cli.TektonParams{}
 	tknParams.SetNamespace(o.GetNamespace())
 	// KLUGE: tkn reader.Read() will raise an error if a step in the TaskRun failed and there is no
@@ -392,8 +387,8 @@ func (r *Reconciler) streamLogs(octx context.Context, o results.Object, logType,
 		PipelineRunName: o.GetName(),
 		TaskrunName:     o.GetName(),
 		Stream: &cli.Stream{
-			Out: writer,
-			Err: writer,
+			Out: inMemWriteBufferStdout,
+			Err: inMemWriteBufferStderr,
 		},
 	})
 	if err != nil {
@@ -404,134 +399,63 @@ func (r *Reconciler) streamLogs(octx context.Context, o results.Object, logType,
 		return fmt.Errorf("error reading from tkn reader: %w", err)
 	}
 
-	errChanRepeater := make(chan error, 100) // some stuff on the internet says buffered channels are better for GC
-
-	go func(ctx context.Context, echan <-chan error, o metav1.Object) {
-		defer close(errChanRepeater)
-		logger.Infow("GGM3 streamLogs go func start",
-			zap.String("namespace", o.GetNamespace()),
-			zap.String("name", o.GetName()),
-		)
-		select {
-		case <-ctx.Done():
-			logger.Warnw("Context done streaming log",
-				zap.String("namespace", o.GetNamespace()),
-				zap.String("name", o.GetName()),
-			)
-		case writeErr := <-echan:
-			errChanRepeater <- writeErr
-		}
-		logger.Infow("GGM4 streamLogs go func start",
-			zap.String("namespace", o.GetNamespace()),
-			zap.String("name", o.GetName()),
-		)
-
-		var gofuncerr error
-		var flushCount int
-		flushCount, gofuncerr = writer.Flush()
-		logger.Infow("GGMGGM1 flush ret count",
-			zap.String("name", o.GetName()),
-			zap.Int("flushCount", flushCount))
-		if gofuncerr != nil {
-			logger.Infow("GGMGGM1 flush ret err",
-				zap.String("error", gofuncerr.Error()))
-			logger.Error(gofuncerr)
-		}
-		if gofuncerr = logsClient.CloseSend(); gofuncerr != nil {
-			logger.Infow("GGMGGM2 CloseSend ret err",
-				zap.String("name", o.GetName()),
-				zap.String("error", gofuncerr.Error()))
-			logger.Error(gofuncerr)
-		}
-		logger.Debugw("Flush in streamLogs done",
-			zap.String("namespace", o.GetNamespace()),
-			zap.String("name", o.GetName()),
-		)
-		logger.Infow("GGM5 streamLogs go func end",
-			zap.String("namespace", o.GetNamespace()),
-			zap.String("name", o.GetName()),
-		)
-		logger.Debugw("Gofunc in streamLogs done",
-			zap.String("namespace", o.GetNamespace()),
-			zap.String("name", o.GetName()),
-		)
-	}(ctx, errChan, o)
-
-	// errChanRepeater receives stderr from the TaskRun containers.
-	// This will be forwarded as combined output (stdout and stderr)
-
 	tknlog.NewWriter(logType, true).Write(&cli.Stream{
-		Out: writer,
-		Err: writer,
-	}, logChan, errChanRepeater)
+		Out: inMemWriteBufferStdout,
+		Err: inMemWriteBufferStderr,
+	}, logChan, errChan)
 
-	logger.Infow("GGM6 streamLogs before final select",
-		zap.String("namespace", o.GetNamespace()),
-		zap.String("name", o.GetName()),
-	)
-
-	// we have to block on either the context getting cancelled, which happens in our flush/closesend goroutine above,
-	// or the timeout has occurred; otherwise, when this method exits and cancel gets called, it will interrupt the
-	// UpdateLogs call, which will error out with a 'context canceled' message
-	select {
-	case <-ctx.Done():
-		if ctx.Err() == context.Canceled {
-			// this means our goroutine above has finished and canceled the context, which is our 'steady state' or
-			// normal operations path
-			return nil
-		}
-		// if we did not complete because we timed out, let's see if reconciling and trying again help the logs there this time
-		return ctx.Err()
-	case <-errChanRepeater:
-		break
-	}
-
-	logger.Infow("GGM7 streamLogs after final select",
-		zap.String("namespace", o.GetNamespace()),
-		zap.String("name", o.GetName()),
-	)
-
-	// however, in e2e-gcs testing, there will still timing issues with ^^ where the UpdateLogs call would get context canceled
-	// if we still call 'defer cancel()' per proper go conventions; thus, we add a get log recv check here to make sure it is complete
-	getLogOpts := pb.GetLogRequest{Name: logName}
-	getLogClient, getLogClientErr := r.resultsClient.GetLog(ctx, &getLogOpts)
-	if getLogClientErr != nil {
-		logger.Infow("GGM8 streamLogs cannot get get logs client",
-			zap.String("error", getLogClientErr.Error()),
+	bufStdout := inMemWriteBufferStdout.Bytes()
+	cntStdout, writeStdOutErr := writer.Write(bufStdout)
+	if writeStdOutErr != nil {
+		logger.Infow("GGM3 streamLogs in mem bufStdout write err",
+			zap.String("error", writeStdOutErr.Error()),
 			zap.String("namespace", o.GetNamespace()),
 			zap.String("name", o.GetName()),
 		)
+		return writeStdOutErr
 	}
-	// this is suppose to block once entry is there, but not if the entry is missing
-	if waitErr := wait.PollImmediate(1*time.Second, 5*time.Second, func() (done bool, err error) {
-		_, recvErr := getLogClient.Recv()
-		if recvErr != nil && status.Code(recvErr) == codes.NotFound {
-			logger.Infow("GGM9 streamLogs log client recv not found error, retry",
-				zap.String("error", recvErr.Error()),
-				zap.String("namespace", o.GetNamespace()),
-				zap.String("name", o.GetName()),
-			)
-			return false, nil
-		}
-		if recvErr != nil {
-			logger.Infow("GGM9 streamLogs log client recv got unexpected error, abort",
-				zap.String("error", recvErr.Error()),
-				zap.String("namespace", o.GetNamespace()),
-				zap.String("name", o.GetName()),
-			)
-			return false, recvErr
-		}
-		return true, nil
-	}); waitErr != nil {
-		logger.Infow("GGM9 streamLogs log client recv retries did not work",
-			zap.String("error", waitErr.Error()),
+	if cntStdout != len(bufStdout) {
+		logger.Infow("GGM4 streamLogs bufStdout write len inconsistent",
+			zap.Int("in", len(bufStdout)),
+			zap.Int("out", cntStdout),
 			zap.String("namespace", o.GetNamespace()),
 			zap.String("name", o.GetName()),
 		)
 
 	}
+	bufStderr := inMemWriteBufferStderr.Bytes()
+	// we do not write these errors to the results api server
 
-	logger.Infow("GGM10 streamLogs recv successful exiting",
+	// TODO we may need somehow discern the precise nature of the errors here and adjust how
+	// we return accordingly
+	if len(bufStderr) > 0 {
+		errStr := string(bufStderr)
+		logger.Infow("GGMGGM2 tkn client std error output",
+			zap.String("name", o.GetName()),
+			zap.String("errStr", errStr))
+		tknErr := fmt.Errorf("%s", errStr)
+		return tknErr
+	}
+
+	flushCount, flushErr := writer.Flush()
+	logger.Infow("GGMGGM1 flush ret count",
+		zap.String("name", o.GetName()),
+		zap.Int("flushCount", flushCount))
+	if flushErr != nil {
+		logger.Infow("GGMGGM1 flush ret err",
+			zap.String("error", flushErr.Error()))
+		logger.Error(flushErr)
+		return flushErr
+	}
+	if closeErr := logsClient.CloseSend(); closeErr != nil {
+		logger.Infow("GGMGGM2 CloseSend ret err",
+			zap.String("name", o.GetName()),
+			zap.String("error", closeErr.Error()))
+		logger.Error(closeErr)
+		return closeErr
+	}
+
+	logger.Infow("GGM5 streamLogs exiting ",
 		zap.String("namespace", o.GetNamespace()),
 		zap.String("name", o.GetName()),
 	)
