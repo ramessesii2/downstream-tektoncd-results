@@ -19,6 +19,10 @@ import (
 	"fmt"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"k8s.io/apimachinery/pkg/util/wait"
+
 	"github.com/fatih/color"
 	"github.com/jonboulle/clockwork"
 	"github.com/tektoncd/cli/pkg/cli"
@@ -365,10 +369,10 @@ func (r *Reconciler) sendLog(ctx context.Context, o results.Object) error {
 
 func (r *Reconciler) streamLogs(octx context.Context, o results.Object, logType, logName string) error {
 	logger := logging.FromContext(octx)
-	// as these update log calls could take a bit, we add a significant timeout to avoid cancelled contexts
-	// on the grpc call
-	ctx, _ := context.WithTimeout(octx, 10*time.Minute)
-	// defer cancel()
+	// TODO: Implement configurable timeout based on user feedback analysis.
+	ctx, cancel := context.WithTimeout(octx, 10*time.Minute)
+	// reminder per godoc multiple calls to cancel are OK
+	defer cancel()
 	logsClient, err := r.resultsClient.UpdateLog(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to create UpdateLog client: %w", err)
@@ -409,12 +413,6 @@ func (r *Reconciler) streamLogs(octx context.Context, o results.Object, logType,
 			zap.String("name", o.GetName()),
 		)
 		select {
-		// TODO: Implement configurable timeout based on user feedback analysis.
-		case <-time.After(10 * time.Minute):
-			logger.Warnw("10 minute timeout exceeded",
-				zap.String("namespace", o.GetNamespace()),
-				zap.String("name", o.GetName()),
-			)
 		case <-ctx.Done():
 			logger.Warnw("Context done streaming log",
 				zap.String("namespace", o.GetNamespace()),
@@ -466,6 +464,77 @@ func (r *Reconciler) streamLogs(octx context.Context, o results.Object, logType,
 		Out: writer,
 		Err: writer,
 	}, logChan, errChanRepeater)
+
+	logger.Infow("GGM6 streamLogs before final select",
+		zap.String("namespace", o.GetNamespace()),
+		zap.String("name", o.GetName()),
+	)
+
+	// we have to block on either the context getting cancelled, which happens in our flush/closesend goroutine above,
+	// or the timeout has occurred; otherwise, when this method exits and cancel gets called, it will interrupt the
+	// UpdateLogs call, which will error out with a 'context canceled' message
+	select {
+	case <-ctx.Done():
+		if ctx.Err() == context.Canceled {
+			// this means our goroutine above has finished and canceled the context, which is our 'steady state' or
+			// normal operations path
+			return nil
+		}
+		// if we did not complete because we timed out, let's see if reconciling and trying again help the logs there this time
+		return ctx.Err()
+	case <-errChanRepeater:
+		break
+	}
+
+	logger.Infow("GGM7 streamLogs after final select",
+		zap.String("namespace", o.GetNamespace()),
+		zap.String("name", o.GetName()),
+	)
+
+	// however, in e2e-gcs testing, there will still timing issues with ^^ where the UpdateLogs call would get context canceled
+	// if we still call 'defer cancel()' per proper go conventions; thus, we add a get log recv check here to make sure it is complete
+	getLogOpts := pb.GetLogRequest{Name: logName}
+	getLogClient, getLogClientErr := r.resultsClient.GetLog(ctx, &getLogOpts)
+	if getLogClientErr != nil {
+		logger.Infow("GGM8 streamLogs cannot get get logs client",
+			zap.String("error", getLogClientErr.Error()),
+			zap.String("namespace", o.GetNamespace()),
+			zap.String("name", o.GetName()),
+		)
+	}
+	// this is suppose to block once entry is there, but not if the entry is missing
+	if waitErr := wait.PollImmediate(1*time.Second, 5*time.Second, func() (done bool, err error) {
+		_, recvErr := getLogClient.Recv()
+		if recvErr != nil && status.Code(recvErr) == codes.NotFound {
+			logger.Infow("GGM9 streamLogs log client recv not found error, retry",
+				zap.String("error", recvErr.Error()),
+				zap.String("namespace", o.GetNamespace()),
+				zap.String("name", o.GetName()),
+			)
+			return false, nil
+		}
+		if recvErr != nil {
+			logger.Infow("GGM9 streamLogs log client recv got unexpected error, abort",
+				zap.String("error", recvErr.Error()),
+				zap.String("namespace", o.GetNamespace()),
+				zap.String("name", o.GetName()),
+			)
+			return false, recvErr
+		}
+		return true, nil
+	}); waitErr != nil {
+		logger.Infow("GGM9 streamLogs log client recv retries did not work",
+			zap.String("error", waitErr.Error()),
+			zap.String("namespace", o.GetNamespace()),
+			zap.String("name", o.GetName()),
+		)
+
+	}
+
+	logger.Infow("GGM10 streamLogs recv successful exiting",
+		zap.String("namespace", o.GetNamespace()),
+		zap.String("name", o.GetName()),
+	)
 
 	logger.Debugw("Exiting streamLogs",
 		zap.String("namespace", o.GetNamespace()),
