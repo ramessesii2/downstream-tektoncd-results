@@ -334,11 +334,6 @@ func (r *Reconciler) sendLog(ctx context.Context, o results.Object) error {
 		)
 
 		go func() {
-			logger.Infow("GGM1 sendLog go func start",
-				zap.String("namespace", o.GetNamespace()),
-				zap.String("kind", o.GetObjectKind().GroupVersionKind().Kind),
-				zap.String("name", o.GetName()),
-			)
 			err := r.streamLogs(ctx, o, logType, logName)
 			if err != nil {
 				logger.Errorw("Error streaming log",
@@ -349,11 +344,6 @@ func (r *Reconciler) sendLog(ctx context.Context, o results.Object) error {
 				)
 			}
 			logger.Debugw("Streaming log completed",
-				zap.String("namespace", o.GetNamespace()),
-				zap.String("kind", o.GetObjectKind().GroupVersionKind().Kind),
-				zap.String("name", o.GetName()),
-			)
-			logger.Infow("GGM2 sendLog go func end",
 				zap.String("namespace", o.GetNamespace()),
 				zap.String("kind", o.GetObjectKind().GroupVersionKind().Kind),
 				zap.String("name", o.GetName()),
@@ -407,7 +397,7 @@ func (r *Reconciler) streamLogs(ctx context.Context, o results.Object, logType, 
 	bufStdout := inMemWriteBufferStdout.Bytes()
 	cntStdout, writeStdOutErr := writer.Write(bufStdout)
 	if writeStdOutErr != nil {
-		logger.Infow("GGM3 streamLogs in mem bufStdout write err",
+		logger.Warnw("streamLogs in mem bufStdout write err",
 			zap.String("error", writeStdOutErr.Error()),
 			zap.String("namespace", o.GetNamespace()),
 			zap.String("name", o.GetName()),
@@ -415,7 +405,7 @@ func (r *Reconciler) streamLogs(ctx context.Context, o results.Object, logType, 
 		return writeStdOutErr
 	}
 	if cntStdout != len(bufStdout) {
-		logger.Infow("GGM4 streamLogs bufStdout write len inconsistent",
+		logger.Warnw("streamLogs bufStdout write len inconsistent",
 			zap.Int("in", len(bufStdout)),
 			zap.Int("out", cntStdout),
 			zap.String("namespace", o.GetNamespace()),
@@ -430,7 +420,7 @@ func (r *Reconciler) streamLogs(ctx context.Context, o results.Object, logType, 
 	// we return accordingly
 	if len(bufStderr) > 0 {
 		errStr := string(bufStderr)
-		logger.Infow("GGMGGM2 tkn client std error output",
+		logger.Warnw("tkn client std error output",
 			zap.String("name", o.GetName()),
 			zap.String("errStr", errStr))
 		tknErr := fmt.Errorf("%s", errStr)
@@ -438,27 +428,22 @@ func (r *Reconciler) streamLogs(ctx context.Context, o results.Object, logType, 
 	}
 
 	flushCount, flushErr := writer.Flush()
-	logger.Infow("GGMGGM1 flush ret count",
+	logger.Warnw("flush ret count",
 		zap.String("name", o.GetName()),
 		zap.Int("flushCount", flushCount))
 	if flushErr != nil {
-		logger.Infow("GGMGGM1 flush ret err",
+		logger.Warnw("flush ret err",
 			zap.String("error", flushErr.Error()))
 		logger.Error(flushErr)
 		return flushErr
 	}
 	if closeErr := logsClient.CloseSend(); closeErr != nil {
-		logger.Infow("GGMGGM2 CloseSend ret err",
+		logger.Warnw("CloseSend ret err",
 			zap.String("name", o.GetName()),
 			zap.String("error", closeErr.Error()))
 		logger.Error(closeErr)
 		return closeErr
 	}
-
-	logger.Infow("GGM5 streamLogs exiting ",
-		zap.String("namespace", o.GetNamespace()),
-		zap.String("name", o.GetName()),
-	)
 
 	logger.Debugw("Exiting streamLogs",
 		zap.String("namespace", o.GetNamespace()),
