@@ -369,7 +369,9 @@ func (r *Reconciler) streamLogs(ctx context.Context, o results.Object, logType, 
 	tknParams.SetNamespace(o.GetNamespace())
 	// KLUGE: tkn reader.Read() will raise an error if a step in the TaskRun failed and there is no
 	// Err writer in the Stream object. This will result in some "error" messages being written to
-	// the log.
+	// the log.  That, coupled with the fact that the tkn client wrappers and oftent masks errors
+	// makes it impossible to differentiate between retryable and permanent k8s errors wrt retrying
+	// reconciliation in this controller
 
 	reader, err := tknlog.NewReader(logType, &tknopts.LogOptions{
 		AllSteps:        true,
@@ -402,7 +404,6 @@ func (r *Reconciler) streamLogs(ctx context.Context, o results.Object, logType, 
 			zap.String("namespace", o.GetNamespace()),
 			zap.String("name", o.GetName()),
 		)
-		return writeStdOutErr
 	}
 	if cntStdout != len(bufStdout) {
 		logger.Warnw("streamLogs bufStdout write len inconsistent",
@@ -423,8 +424,6 @@ func (r *Reconciler) streamLogs(ctx context.Context, o results.Object, logType, 
 		logger.Warnw("tkn client std error output",
 			zap.String("name", o.GetName()),
 			zap.String("errStr", errStr))
-		tknErr := fmt.Errorf("%s", errStr)
-		return tknErr
 	}
 
 	flushCount, flushErr := writer.Flush()
