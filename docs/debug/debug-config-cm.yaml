@@ -1,0 +1,36 @@
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/instance: default
+    app.kubernetes.io/part-of: tekton-pipelines
+  name: config-logging
+  namespace: tekton-pipelines
+apiVersion: v1
+data:
+  loglevel.controller: debug
+  loglevel.webhook: debug
+  zap-logger-config: |
+    {
+      "level": "debug",
+      "development": true,
+      "sampling": {
+        "initial": 100,
+        "thereafter": 100
+      },
+      "outputPaths": ["stdout"],
+      "errorOutputPaths": ["stderr"],
+      "encoding": "json",
+      "encoderConfig": {
+        "timeKey": "timestamp",
+        "levelKey": "severity",
+        "nameKey": "logger",
+        "callerKey": "caller",
+        "messageKey": "message",
+        "stacktraceKey": "stacktrace",
+        "lineEnding": "",
+        "levelEncoder": "",
+        "timeEncoder": "iso8601",
+        "durationEncoder": "",
+        "callerEncoder": ""
+      }
+    }
