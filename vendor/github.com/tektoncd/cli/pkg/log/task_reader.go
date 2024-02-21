@@ -80,7 +80,7 @@ func (r *Reader) readLiveTaskLogs(tr *v1beta1.TaskRun) (<-chan Log, <-chan error
 	if err != nil {
 		return nil, nil, err
 	}
-	logC, errC := r.readPodLogs(podC, podErrC, r.follow, r.timestamps)
+	logC, errC := r.readPodLogs(tr, podC, podErrC, r.follow, r.timestamps)
 	return logC, errC, nil
 }
 
@@ -115,7 +115,7 @@ func (r *Reader) readAvailableTaskLogs(tr *v1beta1.TaskRun) (<-chan Log, <-chan 
 		}
 	}()
 
-	logC, errC := r.readPodLogs(podC, nil, false, r.timestamps)
+	logC, errC := r.readPodLogs(tr, podC, nil, false, r.timestamps)
 	return logC, errC, nil
 }
 
@@ -128,6 +128,7 @@ func (r *Reader) readStepsLogs(logC chan<- Log, errC chan<- error, steps []*step
 		container := pod.Container(step.container)
 		containerLogC, containerLogErrC, err := container.LogReader(follow, timestamps).Read()
 		if err != nil {
+			fmt.Printf("\nRead Step logs error for TaskRun | error in getting logs for step %s: %s\n", step.name, err)
 			errC <- fmt.Errorf("error in getting logs for step %s: %s", step.name, err)
 			continue
 		}
@@ -140,6 +141,7 @@ func (r *Reader) readStepsLogs(logC chan<- Log, errC chan<- error, steps []*step
 					logC <- Log{Task: r.task, Step: step.name, Log: "EOFLOG"}
 					continue
 				}
+				fmt.Printf("\nread step logs successful for Step %s: %s\n", step.name, l.Log)
 				logC <- Log{Task: r.task, Step: step.name, Log: l.Log}
 
 			case e, ok := <-containerLogErrC:
@@ -148,18 +150,21 @@ func (r *Reader) readStepsLogs(logC chan<- Log, errC chan<- error, steps []*step
 					continue
 				}
 
+				fmt.Printf("\nRead Step logs error | failed to get logs for step %s: %s\n", step.name, e)
 				errC <- fmt.Errorf("failed to get logs for %s: %s", step.name, e)
 			}
 		}
 
 		if err := container.Status(); err != nil {
+			fmt.Printf("\nRead Step logs error for step | into the method for step %s: %w\n", step.name, err.Error())
 			errC <- err
 			return
 		}
 	}
 }
 
-func (r *Reader) readPodLogs(podC <-chan string, podErrC <-chan error, follow, timestamps bool) (<-chan Log, <-chan error) {
+func (r *Reader) readPodLogs(tr *v1beta1.TaskRun, podC <-chan string, podErrC <-chan error, follow, timestamps bool) (<-chan Log, <-chan error) {
+	fmt.Printf("\nRead Pod logs debug for TaskRun | into the method for %s\n: ", tr.Name)
 	logC := make(chan Log)
 	errC := make(chan error)
 	var wg sync.WaitGroup
@@ -169,6 +174,7 @@ func (r *Reader) readPodLogs(podC <-chan string, podErrC <-chan error, follow, t
 		// forward pod error to error stream
 		if podErrC != nil {
 			for podErr := range podErrC {
+				fmt.Printf("\nRead Pod logs : forwarding pod error to error stream for TaskRun %s: %s\n", tr.Name, podErr)
 				errC <- podErr
 			}
 		}
@@ -197,8 +203,10 @@ func (r *Reader) readPodLogs(podC <-chan string, podErrC <-chan error, follow, t
 				pod, err = p.Get()
 			}
 			if err != nil {
+				fmt.Printf("\nPod error for TaskRun %s: %s\n", tr.Name, err)
 				errC <- fmt.Errorf("task %s failed: %s. Run tkn tr desc %s for more details", r.task, strings.TrimSpace(err.Error()), r.run)
 			}
+			fmt.Printf("\nRead Pod logs debug for TaskRun | into the gofunc for %s\n", tr.Name)
 			steps := filterSteps(pod, r.allSteps, r.steps)
 			r.readStepsLogs(logC, errC, steps, p, follow, timestamps)
 		}
@@ -256,6 +264,7 @@ func (r *Reader) getTaskRunPodNames(run *v1beta1.TaskRun) (<-chan string, <-chan
 				var err error
 				run, err = cast2taskrun(event.Object)
 				if err != nil {
+					fmt.Printf("\nPod error for TaskRun | cast2taskrun for %s: %s\n", run.Name, err)
 					errC <- err
 					return
 				}
@@ -269,6 +278,7 @@ func (r *Reader) getTaskRunPodNames(run *v1beta1.TaskRun) (<-chan string, <-chan
 				// Check if taskrun failed on start up
 				if err := hasTaskRunFailed(run, r.task, r.retries); err != nil {
 					errC <- err
+					fmt.Printf("\nPod error for TaskRun | taskruNfailed for %s: %s\n", run.Name, err)
 					return
 				}
 				// check if pod has been started and has a name
@@ -278,6 +288,7 @@ func (r *Reader) getTaskRunPodNames(run *v1beta1.TaskRun) (<-chan string, <-chan
 					}
 					return
 				}
+				fmt.Printf("\nPod error for TaskRun | task %s create has not started yet or pod for task not yet available \n", r.task)
 				errC <- fmt.Errorf("task %s create has not started yet or pod for task not yet available", r.task)
 				return
 			}
