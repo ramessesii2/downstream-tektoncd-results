@@ -141,7 +141,7 @@ func (c *Client) ensureResult(ctx context.Context, o Object, opts ...grpc.CallOp
 
 	if topLevel {
 		if value, found := o.GetAnnotations()[annotation.RecordSummaryAnnotations]; found {
-			recordSummaryAnnotations, err := parseAnnotations(annotation.RecordSummaryAnnotations, value)
+			recordSummaryAnnotations, err := parseRecordSummaryAnnotations(annotation.RecordSummaryAnnotations, value)
 			if err != nil {
 				return nil, err
 			}
@@ -198,6 +198,24 @@ func parseAnnotations(annotationKey, value string) (map[string]string, error) {
 		return nil, controller.NewPermanentError(fmt.Errorf("error parsing annotation %s: %w", annotationKey, err))
 	}
 	return annotations, nil
+}
+
+// temp fix to address PLNSRVCE-1679
+// TO DO: switch to a permanent solution
+func parseRecordSummaryAnnotations(annotationKey, value string) (map[string]string, error) {
+	var data map[string]any
+	annotation := make(map[string]string)
+	if err := json.Unmarshal([]byte(value), &data); err != nil {
+		return nil, controller.NewPermanentError(fmt.Errorf("error parsing annotation %s: %w", annotationKey, err))
+	}
+	for key, val := range data {
+		strVal, err := json.Marshal(val)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling annotation value for key %s: %w", key, err)
+		}
+		annotation[key] = string(strVal)
+	}
+	return annotation, nil
 }
 
 func copyKeys(in, out map[string]string) {
